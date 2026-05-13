@@ -1,0 +1,6 @@
+2026-05-14T07:01:10Z env=prod service=worker-ingest level=INFO worker_id=ing_18 msg="poll cycle started" queue=events-import
+2026-05-14T07:01:19Z env=prod service=worker-ingest level=WARN worker_id=ing_18 msg="consumer lag" lag_ms=15210 partition=9
+2026-05-14T07:01:26Z env=prod service=worker-ingest level=WARN worker_id=ing_18 msg="consumer lag" lag_ms=14991 partition=9
+2026-05-14T07:01:34Z env=prod service=worker-ingest level=INFO worker_id=ing_18 msg="backfill checkpoint written" checkpoint=771101
+2026-05-14T07:04:55Z env=prod service=search-api level=INFO request_id=sr_10002 msg="query completed" pattern="consumer lag" matches=2
+

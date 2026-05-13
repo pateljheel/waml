@@ -1,0 +1,7 @@
+2026-04-28T22:03:11Z env=prod service=checkout-api level=INFO request_id=ck_1001 msg="checkout session started" customer_id=c_9812
+2026-04-28T22:03:14Z env=prod service=checkout-api level=WARN request_id=ck_1001 msg="timeout while awaiting headers" upstream=payments-v2 edge=iad-1
+2026-04-28T22:03:15Z env=prod service=checkout-api level=INFO request_id=ck_1001 msg="retrying provider" provider=adyen attempt=1
+2026-04-28T22:03:17Z env=prod service=checkout-api level=INFO request_id=ck_1001 msg="checkout completed after retry" latency_ms=1734
+2026-04-28T22:08:44Z env=prod service=auth-service level=ERROR request_id=au_2210 msg="token refresh failed" user_id=u_771 region=us-east-1
+2026-04-28T22:08:45Z env=prod service=auth-service level=INFO request_id=au_2210 msg="falling back to full login flow"
+

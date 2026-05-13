@@ -1,0 +1,7 @@
+2026-05-13T13:12:09Z env=prod service=checkout-api level=ERROR request_id=ck_4099 msg="timeout while awaiting headers" upstream=payments-v2 edge=iad-1
+2026-05-13T13:12:10Z env=prod service=checkout-api level=INFO request_id=ck_4099 msg="retrying provider" provider=adyen attempt=2
+2026-05-13T13:12:11Z env=prod service=checkout-api level=WARN request_id=ck_4099 msg="circuit=half-open" customer_visible=true
+2026-05-13T13:16:43Z env=prod service=auth-service level=ERROR request_id=au_9012 msg="token refresh failed" user_id=u_9902 region=us-east-1
+2026-05-13T13:16:44Z env=prod service=auth-service level=ERROR request_id=au_9012 msg="token refresh failed" retryable=true
+2026-05-13T13:19:07Z env=prod service=search-api level=INFO request_id=sr_9911 msg="query completed" pattern="timeout while awaiting headers" matches=3
+

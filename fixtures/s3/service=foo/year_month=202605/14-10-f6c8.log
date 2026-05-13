@@ -1,0 +1,6 @@
+2026-05-14T10:28:02Z env=prod service=auth-service level=INFO request_id=au_9210 msg="session validation started" user_id=u_4411
+2026-05-14T10:28:05Z env=prod service=auth-service level=ERROR request_id=au_9210 msg="token refresh failed" user_id=u_4411 region=us-west-2
+2026-05-14T10:28:06Z env=prod service=auth-service level=INFO request_id=au_9210 msg="falling back to full login flow"
+2026-05-14T10:31:48Z env=prod service=checkout-api level=ERROR request_id=ck_5010 msg="timeout while awaiting headers" upstream=payments-v2 edge=sfo-2
+2026-05-14T10:31:49Z env=prod service=checkout-api level=WARN request_id=ck_5010 msg="circuit=half-open" customer_visible=false
+2026-05-14T10:31:52Z env=prod service=checkout-api level=INFO request_id=ck_5010 msg="checkout recovered after retry" latency_ms=1988

@@ -1,0 +1,7 @@
+2026-05-13T12:47:03Z env=prod service=checkout-api level=INFO request_id=ck_4021 msg="checkout session started" customer_id=c_1102
+2026-05-13T12:47:08Z env=prod service=checkout-api level=ERROR request_id=ck_4021 msg="timeout while awaiting headers" upstream=payments-v2 edge=iad-1
+2026-05-13T12:47:09Z env=prod service=checkout-api level=WARN request_id=ck_4021 msg="circuit=half-open" provider=adyen
+2026-05-13T12:47:11Z env=prod service=checkout-api level=INFO request_id=ck_4021 msg="retrying provider" provider=adyen attempt=2
+2026-05-13T12:47:13Z env=prod service=checkout-api level=INFO request_id=ck_4021 msg="checkout completed after retry" latency_ms=2411
+2026-05-13T12:51:56Z env=prod service=edge-router level=INFO request_id=ed_5510 msg="forwarded request" upstream=checkout-api status=200
+

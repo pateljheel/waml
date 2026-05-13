@@ -1,0 +1,6 @@
+2026-04-29T09:11:02Z env=staging service=worker-ingest level=INFO worker_id=ing_14 msg="poll cycle started" queue=events-import
+2026-04-29T09:11:09Z env=staging service=worker-ingest level=WARN worker_id=ing_14 msg="consumer lag" lag_ms=8421 partition=7
+2026-04-29T09:11:14Z env=staging service=worker-ingest level=WARN worker_id=ing_14 msg="consumer lag" lag_ms=10602 partition=7
+2026-04-29T09:11:18Z env=staging service=worker-ingest level=INFO worker_id=ing_14 msg="poll cycle drained" drained=418
+2026-04-29T09:14:41Z env=staging service=search-api level=INFO request_id=sr_8831 msg="query completed" pattern="consumer lag" matches=2
+
