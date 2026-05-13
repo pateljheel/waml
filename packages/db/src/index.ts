@@ -38,6 +38,7 @@ export function initializeDatabase() {
       pattern TEXT NOT NULL,
       start_time TEXT NOT NULL,
       end_time TEXT NOT NULL,
+      source_json TEXT NOT NULL DEFAULT '{}',
       prefix_filters_json TEXT NOT NULL,
       status TEXT NOT NULL,
       created_at TEXT NOT NULL,
@@ -81,6 +82,16 @@ export function initializeDatabase() {
     );
   `);
 
+  const jobColumns = db
+    .prepare("PRAGMA table_info(jobs)")
+    .all() as Array<{ name: string }>;
+
+  if (!jobColumns.some((column) => column.name === "source_json")) {
+    db.exec(
+      "ALTER TABLE jobs ADD COLUMN source_json TEXT NOT NULL DEFAULT '{}'",
+    );
+  }
+
   return db;
 }
 
@@ -97,6 +108,7 @@ export function createJob(input: CreateSearchJobInput): SearchJob {
     pattern: input.pattern,
     startTime: input.startTime,
     endTime: input.endTime,
+    source: input.source,
     prefixFilters: input.prefixFilters,
     status: "pending",
     createdAt: now,
@@ -109,6 +121,7 @@ export function createJob(input: CreateSearchJobInput): SearchJob {
       pattern,
       start_time,
       end_time,
+      source_json,
       prefix_filters_json,
       status,
       created_at,
@@ -119,6 +132,7 @@ export function createJob(input: CreateSearchJobInput): SearchJob {
       @pattern,
       @startTime,
       @endTime,
+      @sourceJson,
       @prefixFiltersJson,
       @status,
       @createdAt,
@@ -126,6 +140,7 @@ export function createJob(input: CreateSearchJobInput): SearchJob {
     )`,
   ).run({
     ...job,
+    sourceJson: JSON.stringify(job.source),
     prefixFiltersJson: JSON.stringify(job.prefixFilters),
     updatedAt: now,
   });
@@ -137,7 +152,7 @@ export function listJobs(): SearchJob[] {
   const db = getConnection();
   const rows = db
     .prepare(
-      `SELECT id, mode, pattern, start_time, end_time, prefix_filters_json, status, created_at
+      `SELECT id, mode, pattern, start_time, end_time, source_json, prefix_filters_json, status, created_at
        FROM jobs
        ORDER BY created_at DESC`,
     )
@@ -147,6 +162,7 @@ export function listJobs(): SearchJob[] {
       pattern: string;
       start_time: string;
       end_time: string;
+      source_json: string;
       prefix_filters_json: string;
       status: SearchJob["status"];
       created_at: string;
@@ -158,6 +174,7 @@ export function listJobs(): SearchJob[] {
     pattern: row.pattern,
     startTime: row.start_time,
     endTime: row.end_time,
+    source: JSON.parse(row.source_json) as SearchJob["source"],
     prefixFilters: JSON.parse(row.prefix_filters_json) as Record<string, string>,
     status: row.status,
     createdAt: row.created_at,
