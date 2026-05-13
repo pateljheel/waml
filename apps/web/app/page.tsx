@@ -9,9 +9,28 @@ type Notebook = {
   awsProfile: string;
   bucket: string;
   rootPrefix: string;
+  customPathPattern: string;
+  partitionOverrides: Record<
+    string,
+    {
+      label: string;
+      kind: "category" | "range";
+      hidden: boolean;
+    }
+  >;
+  partitionFilters: Record<string, string>;
   query: string;
   range: string;
   updatedAt: string;
+};
+
+type PartitionDefinition = {
+  key: string;
+  values: string[];
+  kind: "category" | "range";
+  source: "hive" | "custom";
+  level: number;
+  order: number;
 };
 
 const initialNotebooks: Notebook[] = [
@@ -22,6 +41,9 @@ const initialNotebooks: Notebook[] = [
     awsProfile: "prod-observability",
     bucket: "company-prod-logs",
     rootPrefix: "apps/checkout/prod/",
+    customPathPattern: "",
+    partitionOverrides: {},
+    partitionFilters: {},
     query: 'timeout while awaiting headers service="checkout-api"',
     range: "Last 90 min",
     updatedAt: "2 min ago",
@@ -33,6 +55,9 @@ const initialNotebooks: Notebook[] = [
     awsProfile: "prod-observability",
     bucket: "company-prod-logs",
     rootPrefix: "apps/auth/prod/",
+    customPathPattern: "",
+    partitionOverrides: {},
+    partitionFilters: {},
     query: 'token refresh failed service="auth-service"',
     range: "Today",
     updatedAt: "14 min ago",
@@ -44,6 +69,9 @@ const initialNotebooks: Notebook[] = [
     awsProfile: "stage-observability",
     bucket: "company-stage-logs",
     rootPrefix: "workers/ingest/staging/",
+    customPathPattern: "",
+    partitionOverrides: {},
+    partitionFilters: {},
     query: 'consumer lag service="worker-ingest"',
     range: "May 2026",
     updatedAt: "Yesterday",
@@ -76,6 +104,25 @@ function getPrefixLabel(currentPrefix: string, candidatePrefix: string) {
   return suffix.replace(/\/+$/, "");
 }
 
+function normalizeNotebook(notebook: Partial<Notebook> & Pick<Notebook, "id" | "title">) {
+  return {
+    status: "idle" as Notebook["status"],
+    awsProfile: "",
+    bucket: "",
+    rootPrefix: "",
+    customPathPattern: "",
+    partitionOverrides: {},
+    partitionFilters: {},
+    query: "",
+    range: "",
+    updatedAt: "Just now",
+    ...notebook,
+    customPathPattern: notebook.customPathPattern ?? "",
+    partitionOverrides: notebook.partitionOverrides ?? {},
+    partitionFilters: notebook.partitionFilters ?? {},
+  } satisfies Notebook;
+}
+
 export default function HomePage() {
   const bucketPickerRef = useRef<HTMLDivElement | null>(null);
   const prefixPickerRef = useRef<HTMLDivElement | null>(null);
@@ -85,6 +132,9 @@ export default function HomePage() {
   const [availableProfiles, setAvailableProfiles] = useState<string[]>([]);
   const [availableBuckets, setAvailableBuckets] = useState<string[]>([]);
   const [availablePrefixes, setAvailablePrefixes] = useState<string[]>([]);
+  const [partitionDefinitions, setPartitionDefinitions] = useState<
+    PartitionDefinition[]
+  >([]);
   const [bucketSearch, setBucketSearch] = useState("");
   const [bucketPage, setBucketPage] = useState(1);
   const [bucketTotalPages, setBucketTotalPages] = useState(1);
@@ -98,6 +148,7 @@ export default function HomePage() {
   const [loadingProfiles, setLoadingProfiles] = useState(false);
   const [loadingBuckets, setLoadingBuckets] = useState(false);
   const [loadingPrefixes, setLoadingPrefixes] = useState(false);
+  const [loadingPartitions, setLoadingPartitions] = useState(false);
   const [bucketReloadToken, setBucketReloadToken] = useState(0);
 
   const activeNotebook =
@@ -112,9 +163,12 @@ export default function HomePage() {
 
       const parsed = JSON.parse(saved) as Notebook[];
       if (Array.isArray(parsed) && parsed.length > 0) {
-        setNotebooks(parsed);
-        setActiveNotebookId(parsed[0].id);
-        setDraftTitle(parsed[0].title);
+        const normalized = parsed.map((notebook) =>
+          normalizeNotebook(notebook),
+        );
+        setNotebooks(normalized);
+        setActiveNotebookId(normalized[0].id);
+        setDraftTitle(normalized[0].title);
       }
     } catch {
       // Ignore malformed local state and keep defaults.
@@ -180,6 +234,9 @@ export default function HomePage() {
       awsProfile: activeNotebook.awsProfile,
       bucket: activeNotebook.bucket,
       rootPrefix: activeNotebook.rootPrefix,
+      customPathPattern: activeNotebook.customPathPattern,
+      partitionOverrides: activeNotebook.partitionOverrides ?? {},
+      partitionFilters: activeNotebook.partitionFilters ?? {},
       query: "",
       range: "Last 60 min",
       updatedAt: "Just now",
@@ -349,7 +406,14 @@ export default function HomePage() {
           setNotebooks((currentNotebooks) =>
             currentNotebooks.map((notebook) =>
               notebook.id === activeNotebookId
-                ? { ...notebook, bucket: buckets[0], rootPrefix: "", updatedAt: "Just now" }
+                ? {
+                    ...notebook,
+                    bucket: buckets[0],
+                    rootPrefix: "",
+                    partitionOverrides: {},
+                    partitionFilters: {},
+                    updatedAt: "Just now",
+                  }
                 : notebook,
             ),
           );
@@ -452,6 +516,104 @@ export default function HomePage() {
   ]);
 
   useEffect(() => {
+    if (!activeNotebook.awsProfile || !activeNotebook.bucket) {
+      setPartitionDefinitions([]);
+      return;
+    }
+
+    let cancelled = false;
+    setPartitionDefinitions([]);
+    const timeoutId = window.setTimeout(async () => {
+      setLoadingPartitions(true);
+
+      try {
+        const response = await fetch(
+          `/api/aws/partitions?profile=${encodeURIComponent(
+            activeNotebook.awsProfile,
+          )}&bucket=${encodeURIComponent(
+            activeNotebook.bucket,
+          )}&rootPrefix=${encodeURIComponent(
+            activeNotebook.rootPrefix,
+          )}&pathPattern=${encodeURIComponent(activeNotebook.customPathPattern)}`,
+        );
+        const payload = (await response.json()) as {
+          partitions?: PartitionDefinition[];
+          error?: string;
+        };
+
+        if (!response.ok) {
+          throw new Error(payload.error ?? "Failed to infer Hive partitions");
+        }
+
+        if (cancelled) {
+          return;
+        }
+
+        const nextDefinitions = payload.partitions ?? [];
+        setPartitionDefinitions(nextDefinitions);
+
+        const nextKeys = new Set(nextDefinitions.map((partition) => partition.key));
+
+        setNotebooks((currentNotebooks) =>
+          currentNotebooks.map((notebook) => {
+            if (notebook.id !== activeNotebookId) {
+              return notebook;
+            }
+
+            const nextFilters = Object.fromEntries(
+              Object.entries(notebook.partitionFilters ?? {}).filter(([key, value]) => {
+                const definition = nextDefinitions.find(
+                  (partition) => partition.key === key,
+                );
+
+                return Boolean(definition && definition.values.includes(value));
+              }),
+            );
+
+            for (const key of Object.keys(nextFilters)) {
+              if (!nextKeys.has(key)) {
+                delete nextFilters[key];
+              }
+            }
+
+            return {
+              ...notebook,
+              partitionOverrides: Object.fromEntries(
+                Object.entries(notebook.partitionOverrides ?? {}).filter(([key]) =>
+                  nextKeys.has(key),
+                ),
+              ),
+              partitionFilters: nextFilters,
+            };
+          }),
+        );
+      } catch (error) {
+        if (!cancelled) {
+          setAwsError(
+            error instanceof Error ? error.message : "Failed to infer Hive partitions",
+          );
+          setPartitionDefinitions([]);
+        }
+      } finally {
+        if (!cancelled) {
+          setLoadingPartitions(false);
+        }
+      }
+    }, 250);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timeoutId);
+    };
+  }, [
+    activeNotebook.awsProfile,
+    activeNotebook.bucket,
+    activeNotebook.rootPrefix,
+    activeNotebook.customPathPattern,
+    activeNotebookId,
+  ]);
+
+  useEffect(() => {
     setBucketPage(1);
   }, [bucketSearch, activeNotebook.awsProfile]);
 
@@ -472,6 +634,82 @@ export default function HomePage() {
   const prefixParts = activeNotebook.rootPrefix.split("/").filter(Boolean);
   const prefixLabel =
     activeNotebook.rootPrefix.trim() === "" ? "/" : activeNotebook.rootPrefix;
+  const hasCustomPattern = activeNotebook.customPathPattern.trim().length > 0;
+  const editablePartitions = [...partitionDefinitions]
+    .sort((left, right) =>
+      left.level === right.level
+        ? left.order === right.order
+          ? left.key.localeCompare(right.key)
+          : left.order - right.order
+        : left.level - right.level,
+    )
+    .map((partition) => {
+      const override = activeNotebook.partitionOverrides?.[partition.key];
+      return {
+        ...partition,
+        label: override?.label || partition.key,
+        kind: override?.kind || partition.kind,
+        hidden: override?.hidden ?? false,
+        selectedValue: activeNotebook.partitionFilters?.[partition.key] ?? "",
+      };
+    });
+
+  function updatePartitionFilter(key: string, value: string) {
+    setNotebooks((currentNotebooks) =>
+      currentNotebooks.map((notebook) => {
+        if (notebook.id !== activeNotebookId) {
+          return notebook;
+        }
+
+        const nextFilters = { ...notebook.partitionFilters };
+
+        if (!value) {
+          delete nextFilters[key];
+        } else {
+          nextFilters[key] = value;
+        }
+
+        return {
+          ...notebook,
+          partitionFilters: nextFilters,
+          updatedAt: "Just now",
+        };
+      }),
+    );
+  }
+
+  function updatePartitionOverride(
+    key: string,
+    patch: Partial<Notebook["partitionOverrides"][string]>,
+  ) {
+    setNotebooks((currentNotebooks) =>
+      currentNotebooks.map((notebook) => {
+        if (notebook.id !== activeNotebookId) {
+          return notebook;
+        }
+
+        const currentOverride = notebook.partitionOverrides?.[key] ?? {
+          label: key,
+          kind:
+            partitionDefinitions.find((partition) => partition.key === key)?.kind ??
+            "category",
+          hidden: false,
+        };
+
+        return {
+          ...notebook,
+          partitionOverrides: {
+            ...notebook.partitionOverrides,
+            [key]: {
+              ...currentOverride,
+              ...patch,
+            },
+          },
+          updatedAt: "Just now",
+        };
+      }),
+    );
+  }
 
   return (
     <main className="workspace">
@@ -560,7 +798,9 @@ export default function HomePage() {
               ))}
             </select>
             <span className="field-state">
-              {loadingProfiles ? "Loading profiles..." : "Profiles from ~/.aws"}
+              {loadingProfiles
+                ? "Loading profiles..."
+                : `s3://${activeNotebook.bucket}/${activeNotebook.rootPrefix}`}
             </span>
           </div>
           <div className="field field-bucket">
@@ -769,18 +1009,114 @@ export default function HomePage() {
               ) : null}
             </div>
           </div>
-          <div className="field search-root-hint">
-            <label>Search root</label>
-            <div className="hint-box">
-              <strong>
-                s3://{activeNotebook.bucket}/{activeNotebook.rootPrefix}
-              </strong>
-              <span>
-                WAML infers partitions and files relative to this prefix.
-              </span>
+          {awsError ? (
+            <div className="field search-root-hint">
+              <p className="field-error">{awsError}</p>
             </div>
-            {awsError ? <p className="field-error">{awsError}</p> : null}
+          ) : null}
+          <div className="field search-root-hint">
+            <label htmlFor="custom-path-pattern">Custom path pattern</label>
+            <input
+              id="custom-path-pattern"
+              value={activeNotebook.customPathPattern ?? ""}
+              placeholder="Optional. Example: env={category:env}/year={range:year}/month={range:month} or year={range:year}/{range:day}-{range:hour}-{category:file_id}.log"
+              onChange={(event) =>
+                updateActiveNotebook("customPathPattern", event.target.value)
+              }
+            />
+            <p className="field-state">
+              Use captures like <code>{`{category:name}`}</code> and{" "}
+              <code>{`{range:name}`}</code> relative to the selected root prefix.
+              You can match both directory segments and filenames.
+            </p>
           </div>
+          {partitionDefinitions.length > 0 || loadingPartitions ? (
+            <div className="partition-section">
+              <div className="partition-header">
+                <div>
+                  <label>Dynamic filters</label>
+                  <p className="field-state">
+                    {loadingPartitions
+                      ? "Inspecting prefixes for partition keys..."
+                      : hasCustomPattern
+                        ? "Filters inferred from Hive partitions plus the active custom path pattern."
+                        : "Filters inferred from Hive-style key=value path segments under the selected root."}
+                  </p>
+                </div>
+                {hasCustomPattern ? (
+                  <span className="partition-mode-badge">Custom pattern active</span>
+                ) : null}
+              </div>
+              {editablePartitions.length > 0 ? (
+                <div className="partition-strip">
+                  {editablePartitions.map((partition) => (
+                    <div
+                      key={partition.key}
+                      className={`partition-chip${partition.hidden ? " is-muted" : ""}`}
+                    >
+                      <div className="partition-chip-header">
+                        <input
+                          className="partition-chip-title"
+                          aria-label={`Label for ${partition.key}`}
+                          value={partition.label}
+                          onChange={(event) =>
+                            updatePartitionOverride(partition.key, {
+                              label: event.target.value,
+                            })
+                          }
+                        />
+                        <span className={`filter-source-badge source-${partition.source}`}>
+                          {partition.source}
+                        </span>
+                      </div>
+                      <div className="partition-chip-controls">
+                        <select
+                          id={`partition-${partition.key}`}
+                          className="control"
+                          value={partition.selectedValue}
+                          disabled={partition.hidden}
+                          onChange={(event) =>
+                            updatePartitionFilter(partition.key, event.target.value)
+                          }
+                        >
+                          <option value="">All</option>
+                          {partition.values.map((value) => (
+                            <option key={value} value={value}>
+                              {value}
+                            </option>
+                          ))}
+                        </select>
+                        <select
+                          className="control partition-kind-select"
+                          value={partition.kind}
+                          onChange={(event) =>
+                            updatePartitionOverride(partition.key, {
+                              kind: event.target.value as "category" | "range",
+                            })
+                          }
+                        >
+                          <option value="category">Category</option>
+                          <option value="range">Range</option>
+                        </select>
+                        <label className="partition-toggle">
+                          <input
+                            type="checkbox"
+                            checked={!partition.hidden}
+                            onChange={(event) =>
+                              updatePartitionOverride(partition.key, {
+                                hidden: !event.target.checked,
+                              })
+                            }
+                          />
+                          <span>Show</span>
+                        </label>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
         </section>
       </section>
     </main>

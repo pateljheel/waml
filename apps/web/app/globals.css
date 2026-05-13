@@ -281,26 +281,119 @@ select:focus {
   grid-column: 1 / -1;
 }
 
-.hint-box {
+.partition-section {
+  grid-column: 1 / -1;
   display: grid;
-  gap: 5px;
-  padding: 12px 14px;
+  gap: 12px;
+  padding-top: 4px;
+}
+
+.partition-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.partition-header label {
+  display: block;
+}
+
+.partition-mode-badge,
+.filter-source-badge {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0.2rem 0.5rem;
+  font-size: 0.7rem;
+  color: var(--muted);
+  background: rgba(15, 23, 42, 0.03);
+  white-space: nowrap;
+}
+
+.partition-mode-badge {
+  border-color: var(--border-strong);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.partition-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.partition-chip {
+  display: grid;
+  gap: 8px;
+  min-width: 280px;
+  padding: 10px;
   border: 1px solid var(--border);
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.7);
-  box-shadow: var(--shadow);
+  background: rgba(255, 255, 255, 0.55);
 }
 
-.hint-box strong {
-  font-size: 0.84rem;
-  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
-  font-weight: 500;
-  word-break: break-all;
+.partition-chip.is-muted {
+  opacity: 0.7;
 }
 
-.hint-box span {
+.partition-chip-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.partition-chip-title {
+  min-height: auto;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text);
+  font-weight: 600;
+  box-shadow: none;
+}
+
+.partition-chip-title:focus {
+  border: 0;
+  box-shadow: none;
+}
+
+.partition-chip-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 124px auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.partition-kind-select {
+  min-width: 0;
+}
+
+.partition-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  color: var(--muted-2);
+  white-space: nowrap;
+}
+
+.partition-toggle input {
+  width: auto;
+  min-height: auto;
+}
+
+.source-custom {
+  color: var(--accent);
+  border-color: rgba(47, 111, 237, 0.2);
+  background: rgba(47, 111, 237, 0.08);
+}
+
+.source-hive {
   color: var(--muted);
-  font-size: 0.77rem;
 }
 
 .pager-row {
@@ -501,5 +594,13 @@ select:focus {
   .search-bar {
     grid-template-columns: 1fr;
     padding: 0;
+  }
+
+  .partition-chip {
+    min-width: 100%;
+  }
+
+  .partition-chip-controls {
+    grid-template-columns: 1fr;
   }
 }

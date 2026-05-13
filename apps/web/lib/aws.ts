@@ -9,6 +9,15 @@ import os from "node:os";
 import path from "node:path";
 
 type IniSectionMap = Record<string, Record<string, string>>;
+type FilterKind = "category" | "range";
+type InferredPartition = {
+  key: string;
+  values: string[];
+  kind: FilterKind;
+  source: "hive" | "custom";
+  level: number;
+  order: number;
+};
 
 const configPath = path.join(os.homedir(), ".aws", "config");
 const credentialsPath = path.join(os.homedir(), ".aws", "credentials");
@@ -180,5 +189,341 @@ export async function listPrefixesForBucket({
       .sort((left, right) => left.localeCompare(right)),
     nextContinuationToken: response.NextContinuationToken ?? null,
     isTruncated: response.IsTruncated ?? false,
+  };
+}
+
+type PartitionAccumulator = Map<string, Set<string>>;
+type PartitionDefinitionAccumulator = Map<
+  string,
+  {
+    kind: FilterKind;
+    source: "hive" | "custom";
+    level: number;
+    order: number;
+    values: Set<string>;
+  }
+>;
+
+async function listAllChildrenForBucketLevel({
+  client,
+  bucket,
+  prefix,
+  maxKeys,
+}: {
+  client: S3Client;
+  bucket: string;
+  prefix: string;
+  maxKeys: number;
+}) {
+  const collectedPrefixes: string[] = [];
+  const collectedObjectKeys: string[] = [];
+  let continuationToken: string | undefined;
+
+  do {
+    const response = await client.send(
+      new ListObjectsV2Command({
+        Bucket: bucket,
+        Prefix: prefix,
+        Delimiter: "/",
+        ContinuationToken: continuationToken,
+        MaxKeys: maxKeys,
+      }),
+    );
+
+    collectedPrefixes.push(
+      ...(response.CommonPrefixes ?? [])
+        .map((entry) => entry.Prefix)
+        .filter((value): value is string => Boolean(value)),
+    );
+
+    collectedObjectKeys.push(
+      ...(response.Contents ?? [])
+        .map((entry) => entry.Key)
+        .filter((value): value is string => Boolean(value))
+        .filter((value) => value !== prefix),
+    );
+
+    continuationToken = response.NextContinuationToken ?? undefined;
+  } while (continuationToken);
+
+  return {
+    prefixes: collectedPrefixes.sort((left, right) => left.localeCompare(right)),
+    objectKeys: collectedObjectKeys.sort((left, right) => left.localeCompare(right)),
+  };
+}
+
+async function collectRelativePrefixes({
+  profile,
+  bucket,
+  rootPrefix,
+  maxDepth = 6,
+  maxKeysPerLevel = 200,
+  maxPrefixesToVisit = 500,
+}: {
+  profile: string;
+  bucket: string;
+  rootPrefix: string;
+  maxDepth?: number;
+  maxKeysPerLevel?: number;
+  maxPrefixesToVisit?: number;
+}) {
+  const client = await createS3Client(profile);
+  const normalizedRootPrefix = rootPrefix.trim();
+  const relativePaths = new Set<string>();
+  const queue: Array<{ prefix: string; depth: number }> = [
+    { prefix: normalizedRootPrefix, depth: 0 },
+  ];
+  let visitedCount = 0;
+
+  while (queue.length > 0 && visitedCount < maxPrefixesToVisit) {
+    const current = queue.shift();
+
+    if (!current) {
+      break;
+    }
+
+    if (current.depth >= maxDepth) {
+      continue;
+    }
+
+    const { prefixes: childPrefixes, objectKeys } = await listAllChildrenForBucketLevel({
+      client,
+      bucket,
+      prefix: current.prefix,
+      maxKeys: maxKeysPerLevel,
+    });
+
+    for (const childPrefix of childPrefixes) {
+      visitedCount += 1;
+      const relativePrefix = normalizedRootPrefix
+        ? childPrefix.slice(normalizedRootPrefix.length)
+        : childPrefix;
+      relativePaths.add(relativePrefix);
+
+      queue.push({ prefix: childPrefix, depth: current.depth + 1 });
+
+      if (visitedCount >= maxPrefixesToVisit) {
+        break;
+      }
+    }
+
+    for (const objectKey of objectKeys) {
+      const relativeObjectKey = normalizedRootPrefix
+        ? objectKey.slice(normalizedRootPrefix.length)
+        : objectKey;
+
+      if (relativeObjectKey) {
+        relativePaths.add(relativeObjectKey);
+      }
+    }
+  }
+
+  return {
+    normalizedRootPrefix,
+    relativePrefixes: [...relativePaths].sort((left, right) =>
+      left.localeCompare(right),
+    ),
+  };
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function inferHivePartitionsFromPrefixes(relativePrefixes: string[]) {
+  const accumulator = new Map<
+    string,
+    { values: Set<string>; level: number; order: number }
+  >();
+
+  for (const relativePrefix of relativePrefixes) {
+    const segments = relativePrefix.split("/").filter(Boolean);
+
+    for (const [index, segment] of segments.entries()) {
+      const hiveMatch = segment.match(/^([^=\/]+)=(.+)$/);
+
+      if (!hiveMatch) {
+        continue;
+      }
+
+      const [, key, value] = hiveMatch;
+      const current = accumulator.get(key) ?? {
+        values: new Set<string>(),
+        level: index,
+        order: index,
+      };
+      current.values.add(value);
+      current.level = Math.min(current.level, index);
+      current.order = Math.min(current.order, index);
+      accumulator.set(key, current);
+    }
+  }
+
+  return [...accumulator.entries()].map(([key, definition]) => ({
+    key,
+    values: [...definition.values].sort((left, right) => left.localeCompare(right)),
+    kind: "category" as const,
+    source: "hive" as const,
+    level: definition.level,
+    order: definition.order,
+  }));
+}
+
+function compileCustomPathPattern(pathPattern: string) {
+  const normalizedPattern = pathPattern.trim().replace(/^\/+|\/+$/g, "");
+  const capturePattern = /\{(category|range):([A-Za-z_][A-Za-z0-9_]*)\}/g;
+  const captures: Array<{ kind: FilterKind; key: string }> = [];
+  let regexSource = "^";
+  let lastIndex = 0;
+
+  for (const match of normalizedPattern.matchAll(capturePattern)) {
+    const [fullMatch, kind, key] = match;
+    const matchIndex = match.index ?? 0;
+    regexSource += escapeRegExp(normalizedPattern.slice(lastIndex, matchIndex));
+    regexSource += "([^/]+)";
+    captures.push({ kind: kind as FilterKind, key });
+    lastIndex = matchIndex + fullMatch.length;
+  }
+
+  regexSource += escapeRegExp(normalizedPattern.slice(lastIndex));
+  regexSource += "/?$";
+
+  return {
+    regex: new RegExp(regexSource),
+    captures,
+    normalizedPattern,
+  };
+}
+
+function inferCustomPartitionsFromPrefixes(
+  relativePrefixes: string[],
+  pathPattern: string,
+) {
+  const compiled = compileCustomPathPattern(pathPattern);
+
+  if (compiled.captures.length === 0) {
+    return [] as InferredPartition[];
+  }
+
+  const accumulator: PartitionDefinitionAccumulator = new Map();
+  const captureMetadata = compiled.captures.map((capture, index) => {
+    const token = `{${capture.kind}:${capture.key}}`;
+    const tokenIndex = compiled.normalizedPattern.indexOf(token);
+    const before = tokenIndex >= 0 ? compiled.normalizedPattern.slice(0, tokenIndex) : "";
+    return {
+      level: before.split("/").filter(Boolean).length,
+      order: index,
+    };
+  });
+
+  for (const relativePrefix of relativePrefixes) {
+    const normalizedRelativePrefix = relativePrefix.replace(/\/+$/, "");
+    const match = normalizedRelativePrefix.match(compiled.regex);
+
+    if (!match) {
+      continue;
+    }
+
+    compiled.captures.forEach((capture, index) => {
+      const value = match[index + 1];
+
+      if (!value) {
+        return;
+      }
+
+      const current = accumulator.get(capture.key) ?? {
+        kind: capture.kind,
+        source: "custom" as const,
+        level: captureMetadata[index]?.level ?? 0,
+        order: captureMetadata[index]?.order ?? index,
+        values: new Set<string>(),
+      };
+
+      current.values.add(value);
+      current.level = Math.min(current.level, captureMetadata[index]?.level ?? 0);
+      current.order = Math.min(current.order, captureMetadata[index]?.order ?? index);
+      accumulator.set(capture.key, current);
+    });
+  }
+
+  return [...accumulator.entries()].map(([key, definition]) => ({
+    key,
+    values: [...definition.values].sort((left, right) =>
+      left.localeCompare(right),
+    ),
+    kind: definition.kind,
+    source: definition.source,
+    level: definition.level,
+    order: definition.order,
+  }));
+}
+
+export async function inferPartitions({
+  profile,
+  bucket,
+  rootPrefix,
+  pathPattern,
+  maxDepth = 6,
+  maxKeysPerLevel = 200,
+  maxPrefixesToVisit = 500,
+}: {
+  profile: string;
+  bucket: string;
+  rootPrefix: string;
+  pathPattern?: string;
+  maxDepth?: number;
+  maxKeysPerLevel?: number;
+  maxPrefixesToVisit?: number;
+}) {
+  const { normalizedRootPrefix, relativePrefixes } = await collectRelativePrefixes({
+    profile,
+    bucket,
+    rootPrefix,
+    maxDepth,
+    maxKeysPerLevel,
+    maxPrefixesToVisit,
+  });
+
+  const merged: PartitionDefinitionAccumulator = new Map();
+  const hivePartitions = inferHivePartitionsFromPrefixes(relativePrefixes);
+  const trimmedPattern = pathPattern?.trim() ?? "";
+  const customPartitions = trimmedPattern
+    ? inferCustomPartitionsFromPrefixes(relativePrefixes, trimmedPattern)
+    : [];
+
+  const basePartitions =
+    trimmedPattern && customPartitions.length > 0 ? customPartitions : hivePartitions;
+
+  for (const partition of basePartitions) {
+    merged.set(partition.key, {
+      kind: partition.kind,
+      source: partition.source,
+      level: partition.level,
+      order: partition.order,
+      values: new Set(partition.values),
+    });
+  }
+
+  return {
+    rootPrefix: normalizedRootPrefix,
+    pathPattern: trimmedPattern,
+    partitions: [...merged.entries()]
+      .map(([key, definition]) => ({
+        key,
+        values: [...definition.values].sort((left, right) =>
+          left.localeCompare(right),
+        ),
+        kind: definition.kind,
+        source: definition.source,
+        level: definition.level,
+        order: definition.order,
+      }))
+      .sort((left, right) =>
+        left.level === right.level
+          ? left.order === right.order
+            ? left.key.localeCompare(right.key)
+            : left.order - right.order
+          : left.level - right.level,
+      ),
   };
 }
