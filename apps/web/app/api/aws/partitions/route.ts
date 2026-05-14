@@ -2,6 +2,8 @@ import { inferPartitions } from "../../../../lib/aws";
 import { NextResponse } from "next/server";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
@@ -24,7 +26,11 @@ export async function GET(request: Request) {
       rootPrefix,
       pathPattern,
     });
-    return NextResponse.json(result);
+    return NextResponse.json(result, {
+      headers: {
+        "Cache-Control": "no-store, max-age=0",
+      },
+    });
   } catch (error) {
     return NextResponse.json(
       {
@@ -33,7 +39,12 @@ export async function GET(request: Request) {
             ? error.message
             : "Failed to infer Hive partitions",
       },
-      { status: 500 },
+      {
+        status: 500,
+        headers: {
+          "Cache-Control": "no-store, max-age=0",
+        },
+      },
     );
   }
 }

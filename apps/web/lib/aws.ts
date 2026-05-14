@@ -1,3 +1,5 @@
+import "server-only";
+
 import {
   ListBucketsCommand,
   ListObjectsV2Command,

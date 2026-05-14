@@ -308,7 +308,9 @@ export default function HomePage() {
       setAwsError(null);
 
       try {
-        const response = await fetch("/api/aws/profiles");
+        const response = await fetch("/api/aws/profiles", {
+          cache: "no-store",
+        });
         const payload = (await response.json()) as {
           profiles?: string[];
           error?: string;
@@ -380,6 +382,9 @@ export default function HomePage() {
           `/api/aws/buckets?profile=${encodeURIComponent(
             activeNotebook.awsProfile,
           )}&search=${encodeURIComponent(bucketSearch)}&page=${bucketPage}&pageSize=12`,
+          {
+            cache: "no-store",
+          },
         );
         const payload = (await response.json()) as {
           buckets?: string[];
@@ -473,6 +478,9 @@ export default function HomePage() {
               ? `&continuationToken=${encodeURIComponent(prefixCursor)}`
               : ""
           }`,
+          {
+            cache: "no-store",
+          },
         );
         const payload = (await response.json()) as {
           prefixes?: string[];
@@ -535,6 +543,9 @@ export default function HomePage() {
           )}&rootPrefix=${encodeURIComponent(
             activeNotebook.rootPrefix,
           )}&pathPattern=${encodeURIComponent(activeNotebook.customPathPattern)}`,
+          {
+            cache: "no-store",
+          },
         );
         const payload = (await response.json()) as {
           partitions?: PartitionDefinition[];
