@@ -134,6 +134,179 @@ This can be implemented using SQLite tables for:
 
 This avoids introducing a separate queueing system in v1 while keeping the roles properly decoupled.
 
+## Source Scope And Partition Inference
+
+Each notebook should define its search scope with:
+
+- AWS profile
+- bucket
+- root prefix
+- optional custom path pattern
+
+The selected `root prefix` is the logical boundary for both:
+
+- object discovery
+- dynamic filter inference
+
+All filter inference should be relative to that root, not the full bucket key space.
+
+### Prefix Browser Model
+
+The UI should treat the selected bucket and prefix as a lightweight S3 browser:
+
+- users pick an AWS profile
+- users pick a bucket
+- users navigate prefixes under that bucket
+- the chosen prefix becomes the notebook search root
+
+This is not only a convenience feature. It defines the search universe from which partitions and filters are inferred.
+
+### Inference Sources
+
+Dynamic filters may come from two sources:
+
+- Hive-style path segments such as `service=checkout/year_month=202605/`
+- custom path pattern captures applied relative to the selected root
+
+The system should discover candidate relative paths by traversing:
+
+- child prefixes under the selected root
+- object keys under those prefixes
+
+This is important because some filters may live in directory-like segments while others may be encoded in filenames.
+
+### Hive Inference
+
+Hive inference should inspect each relative path segment and detect:
+
+- `key=value`
+
+Example:
+
+```text
+service=checkout/year_month=202605/14-10-a1.log
+```
+
+This should infer:
+
+- `service=checkout`
+- `year_month=202605`
+
+Hive-inferred partitions default to:
+
+- filter type: `category`
+- source: `hive`
+
+### Custom Path Pattern Inference
+
+The notebook may optionally define a `custom path pattern` relative to the selected root prefix.
+
+Supported capture forms:
+
+- `{category:name}`
+- `{range:name}`
+
+Example:
+
+```text
+service={category:service}/year_month={range:year_month}/{range:day}-{range:hour}-{category:file_id}.log
+```
+
+If the relative object path is:
+
+```text
+service=checkout/year_month=202605/14-10-a1.log
+```
+
+the system should infer:
+
+- `service`
+- `year_month`
+- `day`
+- `hour`
+- `file_id`
+
+The custom pattern may match:
+
+- directory segments
+- filename segments
+
+It is intentionally a structured capture syntax, not arbitrary regex.
+
+### Precedence Rules
+
+Inference precedence should be:
+
+1. discover relative prefixes and object paths under the selected root
+2. infer Hive partitions
+3. apply custom path pattern inference
+4. apply notebook-specific partition overrides
+
+Behavior should be:
+
+- if no custom path pattern is present, use Hive inference
+- if a custom path pattern is present and produces matches, use the custom result set as the primary dynamic filter set
+
+This avoids showing redundant Hive and custom filters at the same time when custom captures are intended to replace the raw Hive view.
+
+### Filter Types
+
+Each inferred filter should be classified as one of:
+
+- `category`
+- `range`
+
+Rules:
+
+- Hive-inferred filters default to `category`
+- custom captures explicitly define `category` or `range`
+- notebook overrides may change the displayed type later
+
+In v1, `range` is primarily a semantic/UI distinction rather than a fully separate query engine primitive.
+
+### Hierarchy Ordering
+
+Dynamic filters should be ordered by path hierarchy, not alphabetically.
+
+Each inferred filter should carry:
+
+- `level`: the hierarchy depth relative to the selected root
+- `order`: the left-to-right capture order within that level
+
+Ordering rules:
+
+- sort first by `level`
+- then by `order`
+- then by key only as a final tie-breaker
+
+This matters for patterns where multiple fields come from the same filename segment. For example:
+
+```text
+service={category:service}/year_month={range:year_month}/{range:day}-{range:hour}-{category:file_id}.log
+```
+
+should render filters in this order:
+
+- `service`
+- `year_month`
+- `day`
+- `hour`
+- `file_id`
+
+not alphabetically.
+
+### Notebook Partition Overrides
+
+Inferred partitions should remain machine-derived, but each notebook may overlay user-managed overrides.
+
+Notebook overrides should support:
+
+- label rename
+- type override
+- hide/show
+
+This is safer than editing inference directly because the underlying path scan may change over time without losing notebook-specific intent.
+
 ## Core Design
 
 The system should work at chunk granularity, not whole-object granularity.
@@ -295,6 +468,216 @@ The worker should prioritize:
 - recent prefixes and objects first
 - cached chunks first
 - quick early hits for interactive UX
+
+## Search Job And Streaming Design
+
+Search execution should be implemented as a worker-owned job with progressive event streaming to the UI.
+
+Recommended flow:
+
+1. the `web` process creates a search job
+2. the `worker` process claims and runs it
+3. the `worker` emits structured progress and match events
+4. the `web` process streams those events to the browser over `SSE`
+
+This is a better fit than polling for line-level changes or keeping the entire search inside a request handler.
+
+### Why SSE
+
+`SSE` is the preferred v1 transport because:
+
+- the flow is mostly server-to-client
+- it is browser-native
+- it is simpler than WebSockets
+- it is well-suited to append-only progress and result streams
+
+Use separate endpoints for:
+
+- job submission
+- event streaming
+- cancellation
+
+### Job Lifecycle
+
+Recommended job states:
+
+- `queued`
+- `running`
+- `cancelling`
+- `cancelled`
+- `completed`
+- `failed`
+
+Do not collapse user-requested cancellation directly into `cancelled`. `cancelling` is important because in-flight S3 reads and chunk work must stop asynchronously.
+
+### Search API Shape
+
+Recommended endpoints:
+
+- `POST /api/search`
+  - create a job and return `jobId`
+- `GET /api/search/:jobId`
+  - return the latest job snapshot
+- `GET /api/search/:jobId/events`
+  - open an `SSE` stream
+- `POST /api/search/:jobId/cancel`
+  - request cancellation
+
+The browser should submit a search once, then observe the job through the event stream.
+
+### SQLite Tables For Search
+
+Recommended v1 tables:
+
+#### `search_jobs`
+
+- `id`
+- `notebook_id`
+- `status`
+- `bucket`
+- `root_prefix`
+- `aws_profile`
+- `query_text`
+- `query_mode`
+- `filters_json`
+- `custom_path_pattern`
+- `bytes_scanned`
+- `objects_scanned`
+- `chunks_scanned`
+- `matches_found`
+- `error_message`
+- `cancel_requested_at`
+- `started_at`
+- `finished_at`
+- `created_at`
+- `updated_at`
+
+#### `search_job_events`
+
+- `id`
+- `job_id`
+- `sequence_no`
+- `event_type`
+- `payload_json`
+- `created_at`
+
+#### `search_job_results`
+
+- `id`
+- `job_id`
+- `sequence_no`
+- `object_key`
+- `line_number`
+- `timestamp_text`
+- `line_text`
+- `context_json`
+- `created_at`
+
+The event log does not need to be retained forever. It only needs to support reconnect, replay, and recent inspection.
+
+### Event Model
+
+Recommended event types:
+
+- `job.queued`
+- `job.started`
+- `job.progress`
+- `job.cancelling`
+- `job.cancelled`
+- `job.completed`
+- `job.failed`
+- `partition.started`
+- `object.started`
+- `object.skipped`
+- `chunk.started`
+- `chunk.cached`
+- `chunk.indexed`
+- `match.batch`
+
+The worker should stream structured events, not raw unframed log text.
+
+### Result Batching
+
+Do not emit one event per matching line unless result volume is tiny.
+
+Recommended behavior:
+
+- emit `match.batch` every `N` results or every small time window
+- emit `job.progress` on a timer
+
+Reasonable v1 defaults:
+
+- result batching every `250 ms`
+- progress events every `500 ms`
+
+This reduces event overhead and keeps the UI stable.
+
+### Cancellation Design
+
+Cancellation should be a first-class part of the job model because it directly affects S3 cost and user trust.
+
+Recommended flow:
+
+1. user clicks cancel
+2. `web` marks the job `cancelling`
+3. worker observes the cancellation flag
+4. worker stops scheduling new work
+5. worker aborts in-flight S3 reads where possible
+6. worker flushes final progress
+7. worker marks the job `cancelled`
+
+The event stream should surface:
+
+- `job.cancelling`
+- `job.cancelled`
+
+### Cancellation Granularity
+
+Cancellation should be checked at small work boundaries:
+
+- before listing the next object batch
+- before starting each object
+- before starting each chunk
+- during streaming reads every byte or line batch
+- before writing cache artifacts
+
+The cancellation unit should effectively be:
+
+- partition
+- object
+- chunk
+- line batch
+
+not an entire full-object scan.
+
+### Abortable S3 Reads
+
+The worker should use abortable S3 requests so cancellation saves real cost rather than merely preventing future scheduling.
+
+Without abortable reads, a cancelled job may still finish downloading the active object or chunk, which weakens the cost-control goal.
+
+### Cache Commit Rules Under Cancellation
+
+Cache writes should be conservative:
+
+- keep fully completed chunk artifacts
+- discard partial chunk artifacts
+- write cache metadata only after the artifact is valid
+
+The chunk should be the atomic unit of durable cache commit.
+
+This allows partial work from cancelled jobs to remain useful without corrupting cache state.
+
+### Cost Guardrails
+
+In addition to manual cancellation, the system should support hard limits such as:
+
+- max bytes scanned
+- max objects scanned
+- max runtime
+- max matches returned
+
+These should act as policy-based stop conditions even when the user does not press cancel.
 
 ## Concurrency Model
 

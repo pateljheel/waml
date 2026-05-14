@@ -396,6 +396,97 @@ select:focus {
   color: var(--muted);
 }
 
+.search-section {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 12px;
+  padding-top: 6px;
+}
+
+.search-section-header,
+.search-summary,
+.search-result-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.search-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.search-pattern-field {
+  grid-column: 1 / -1;
+}
+
+.search-summary {
+  flex-wrap: wrap;
+  justify-content: flex-start;
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+
+.search-status {
+  color: var(--muted-2);
+  font-weight: 600;
+}
+
+.status-queued,
+.status-running,
+.status-cancelling {
+  color: var(--running);
+}
+
+.status-cancelled,
+.status-failed {
+  color: var(--danger);
+}
+
+.status-completed {
+  color: var(--accent);
+}
+
+.search-results {
+  display: grid;
+  gap: 8px;
+  max-height: 420px;
+  overflow-y: auto;
+}
+
+.search-results-empty {
+  padding: 12px 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.search-result-row {
+  display: grid;
+  gap: 6px;
+  padding: 10px 0;
+  border-top: 1px solid var(--border);
+}
+
+.search-result-row:first-child {
+  border-top: 0;
+}
+
+.search-result-meta {
+  justify-content: flex-start;
+  flex-wrap: wrap;
+  color: var(--muted);
+  font-size: 0.74rem;
+}
+
+.search-result-line {
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text);
+  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-size: 0.79rem;
+}
+
 .pager-row {
   display: flex;
   gap: 8px;
@@ -602,5 +693,10 @@ select:focus {
 
   .partition-chip-controls {
     grid-template-columns: 1fr;
+  }
+
+  .search-section-header {
+    align-items: flex-start;
+    flex-direction: column;
   }
 }

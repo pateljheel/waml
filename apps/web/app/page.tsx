@@ -1,5 +1,6 @@
 "use client";
 
+import type { SearchJob, SearchJobStatus, SearchMatch } from "@waml/shared";
 import { useEffect, useRef, useState } from "react";
 
 type Notebook = {
@@ -31,6 +32,20 @@ type PartitionDefinition = {
   source: "hive" | "custom";
   level: number;
   order: number;
+};
+
+type NotebookSearchState = {
+  jobId: string | null;
+  status: SearchJobStatus | "idle";
+  progress: {
+    bytesScanned: number;
+    objectsScanned: number;
+    chunksScanned: number;
+    matchesFound: number;
+  };
+  results: SearchMatch[];
+  errorMessage: string | null;
+  connected: boolean;
 };
 
 const initialNotebooks: Notebook[] = [
@@ -90,6 +105,41 @@ function statusLabel(status: Notebook["status"]) {
   return status === "running" ? "Running" : "Idle";
 }
 
+function searchStatusLabel(status: NotebookSearchState["status"]) {
+  switch (status) {
+    case "queued":
+      return "Queued";
+    case "running":
+      return "Running";
+    case "cancelling":
+      return "Cancelling";
+    case "cancelled":
+      return "Cancelled";
+    case "completed":
+      return "Completed";
+    case "failed":
+      return "Failed";
+    default:
+      return "Idle";
+  }
+}
+
+function createEmptySearchState(): NotebookSearchState {
+  return {
+    jobId: null,
+    status: "idle",
+    progress: {
+      bytesScanned: 0,
+      objectsScanned: 0,
+      chunksScanned: 0,
+      matchesFound: 0,
+    },
+    results: [],
+    errorMessage: null,
+    connected: false,
+  };
+}
+
 function getPrefixLabel(currentPrefix: string, candidatePrefix: string) {
   const current = currentPrefix.trim();
 
@@ -105,7 +155,7 @@ function getPrefixLabel(currentPrefix: string, candidatePrefix: string) {
 }
 
 function normalizeNotebook(notebook: Partial<Notebook> & Pick<Notebook, "id" | "title">) {
-  return {
+  const normalizedNotebook = {
     status: "idle" as Notebook["status"],
     awsProfile: "",
     bucket: "",
@@ -117,15 +167,20 @@ function normalizeNotebook(notebook: Partial<Notebook> & Pick<Notebook, "id" | "
     range: "",
     updatedAt: "Just now",
     ...notebook,
-    customPathPattern: notebook.customPathPattern ?? "",
-    partitionOverrides: notebook.partitionOverrides ?? {},
-    partitionFilters: notebook.partitionFilters ?? {},
+  };
+
+  return {
+    ...normalizedNotebook,
+    customPathPattern: normalizedNotebook.customPathPattern ?? "",
+    partitionOverrides: normalizedNotebook.partitionOverrides ?? {},
+    partitionFilters: normalizedNotebook.partitionFilters ?? {},
   } satisfies Notebook;
 }
 
 export default function HomePage() {
   const bucketPickerRef = useRef<HTMLDivElement | null>(null);
   const prefixPickerRef = useRef<HTMLDivElement | null>(null);
+  const eventSourcesRef = useRef<Record<string, EventSource>>({});
   const [notebooks, setNotebooks] = useState(initialNotebooks);
   const [activeNotebookId, setActiveNotebookId] = useState(initialNotebooks[0].id);
   const [draftTitle, setDraftTitle] = useState(initialNotebooks[0].title);
@@ -150,6 +205,9 @@ export default function HomePage() {
   const [loadingPrefixes, setLoadingPrefixes] = useState(false);
   const [loadingPartitions, setLoadingPartitions] = useState(false);
   const [bucketReloadToken, setBucketReloadToken] = useState(0);
+  const [searchStateByNotebook, setSearchStateByNotebook] = useState<
+    Record<string, NotebookSearchState>
+  >({});
 
   const activeNotebook =
     notebooks.find((notebook) => notebook.id === activeNotebookId) ?? notebooks[0];
@@ -213,6 +271,13 @@ export default function HomePage() {
     };
   }, []);
 
+  useEffect(() => {
+    return () => {
+      Object.values(eventSourcesRef.current).forEach((source) => source.close());
+      eventSourcesRef.current = {};
+    };
+  }, []);
+
   function updateActiveNotebook<K extends keyof Notebook>(
     field: K,
     value: Notebook[K],
@@ -224,6 +289,219 @@ export default function HomePage() {
           : notebook,
       ),
     );
+  }
+
+  function setNotebookStatus(notebookId: string, status: Notebook["status"]) {
+    setNotebooks((currentNotebooks) =>
+      currentNotebooks.map((notebook) =>
+        notebook.id === notebookId ? { ...notebook, status } : notebook,
+      ),
+    );
+  }
+
+  function setSearchState(
+    notebookId: string,
+    updater:
+      | NotebookSearchState
+      | ((current: NotebookSearchState) => NotebookSearchState),
+  ) {
+    setSearchStateByNotebook((current) => {
+      const existing = current[notebookId] ?? createEmptySearchState();
+      const nextValue =
+        typeof updater === "function"
+          ? updater(existing)
+          : updater;
+
+      return {
+        ...current,
+        [notebookId]: nextValue,
+      };
+    });
+  }
+
+  function closeSearchStream(notebookId: string) {
+    const source = eventSourcesRef.current[notebookId];
+
+    if (source) {
+      source.close();
+      delete eventSourcesRef.current[notebookId];
+    }
+  }
+
+  function openSearchStream(notebookId: string, jobId: string) {
+    closeSearchStream(notebookId);
+    const source = new EventSource(`/api/search/${jobId}/events`);
+    eventSourcesRef.current[notebookId] = source;
+
+    source.onopen = () => {
+      setSearchState(notebookId, (current) => ({
+        ...current,
+        connected: true,
+      }));
+    };
+
+    source.onmessage = (event) => {
+      const message = JSON.parse(event.data) as {
+        type: string;
+        payload: Record<string, unknown>;
+      };
+
+      setSearchState(notebookId, (current) => {
+        const next = { ...current, connected: true };
+
+        if (message.type === "job.progress") {
+          const payloadProgress = message.payload.progress as
+            | NotebookSearchState["progress"]
+            | undefined;
+
+          if (payloadProgress) {
+            next.progress = payloadProgress;
+          }
+
+          const payloadStatus = message.payload.status as SearchJobStatus | undefined;
+
+          if (payloadStatus) {
+            next.status = payloadStatus;
+            setNotebookStatus(
+              notebookId,
+              payloadStatus === "running" || payloadStatus === "cancelling"
+                ? "running"
+                : "idle",
+            );
+          }
+        }
+
+        if (message.type === "match.batch") {
+          const results = (message.payload.results as SearchMatch[] | undefined) ?? [];
+          next.results = [...next.results, ...results].slice(-500);
+        }
+
+        if (message.type === "job.cancelling") {
+          next.status = "cancelling";
+          setNotebookStatus(notebookId, "running");
+        }
+
+        if (message.type === "job.cancelled") {
+          next.status = "cancelled";
+          next.connected = false;
+          setNotebookStatus(notebookId, "idle");
+          closeSearchStream(notebookId);
+        }
+
+        if (message.type === "job.completed") {
+          next.status = "completed";
+          next.connected = false;
+          setNotebookStatus(notebookId, "idle");
+          closeSearchStream(notebookId);
+        }
+
+        if (message.type === "job.failed") {
+          next.status = "failed";
+          next.errorMessage =
+            (message.payload.errorMessage as string | undefined) ??
+            "Search failed";
+          next.connected = false;
+          setNotebookStatus(notebookId, "idle");
+          closeSearchStream(notebookId);
+        }
+
+        return next;
+      });
+    };
+
+    source.onerror = () => {
+      setSearchState(notebookId, (current) => ({
+        ...current,
+        connected: false,
+      }));
+
+      if (source.readyState === EventSource.CLOSED) {
+        closeSearchStream(notebookId);
+      }
+    };
+  }
+
+  async function runSearch() {
+    const pattern = activeNotebook.query.trim();
+
+    if (!pattern || !activeNotebook.awsProfile || !activeNotebook.bucket) {
+      return;
+    }
+
+    const response = await fetch("/api/search", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        notebookId: activeNotebook.id,
+        mode: "substring",
+        pattern,
+        startTime: "",
+        endTime: "",
+        source: {
+          awsProfile: activeNotebook.awsProfile,
+          bucket: activeNotebook.bucket,
+          rootPrefix: activeNotebook.rootPrefix,
+        },
+        prefixFilters: activeNotebook.partitionFilters,
+        customPathPattern: activeNotebook.customPathPattern,
+      }),
+    });
+
+    const payload = (await response.json()) as {
+      job?: SearchJob;
+      error?: string;
+    };
+
+    if (!response.ok || !payload.job) {
+      setSearchState(activeNotebook.id, (current) => ({
+        ...current,
+        status: "failed",
+        errorMessage: payload.error ?? "Failed to start search",
+      }));
+      return;
+    }
+
+    setSearchState(activeNotebook.id, {
+      jobId: payload.job.id,
+      status: payload.job.status,
+      progress: payload.job.progress,
+      results: [],
+      errorMessage: null,
+      connected: false,
+    });
+    setNotebookStatus(activeNotebook.id, "running");
+    openSearchStream(activeNotebook.id, payload.job.id);
+  }
+
+  async function cancelSearch() {
+    const currentSearch = searchStateByNotebook[activeNotebook.id];
+
+    if (!currentSearch?.jobId) {
+      return;
+    }
+
+    const response = await fetch(`/api/search/${currentSearch.jobId}/cancel`, {
+      method: "POST",
+    });
+    const payload = (await response.json()) as {
+      job?: SearchJob;
+      error?: string;
+    };
+
+    if (!response.ok || !payload.job) {
+      setSearchState(activeNotebook.id, (current) => ({
+        ...current,
+        errorMessage: payload.error ?? "Failed to cancel search",
+      }));
+      return;
+    }
+
+    setSearchState(activeNotebook.id, (current) => ({
+      ...current,
+      status: payload.job?.status ?? current.status,
+    }));
   }
 
   function createNotebook() {
@@ -664,6 +942,19 @@ export default function HomePage() {
         selectedValue: activeNotebook.partitionFilters?.[partition.key] ?? "",
       };
     });
+  const currentSearchState =
+    searchStateByNotebook[activeNotebook.id] ?? createEmptySearchState();
+  const canRunSearch =
+    activeNotebook.query.trim().length > 0 &&
+    activeNotebook.awsProfile.trim().length > 0 &&
+    activeNotebook.bucket.trim().length > 0 &&
+    currentSearchState.status !== "running" &&
+    currentSearchState.status !== "cancelling";
+  const canCancelSearch =
+    currentSearchState.jobId !== null &&
+    (currentSearchState.status === "queued" ||
+      currentSearchState.status === "running" ||
+      currentSearchState.status === "cancelling");
 
   function updatePartitionFilter(key: string, value: string) {
     setNotebooks((currentNotebooks) =>
@@ -1128,6 +1419,79 @@ export default function HomePage() {
               ) : null}
             </div>
           ) : null}
+          <div className="search-section">
+            <div className="search-section-header">
+              <div>
+                <label htmlFor="search-pattern">Search</label>
+                <p className="field-state">
+                  Exact substring match over objects under the selected root.
+                </p>
+              </div>
+              <div className="search-actions">
+                <button
+                  className="secondary-button"
+                  type="button"
+                  disabled={!canRunSearch}
+                  onClick={runSearch}
+                >
+                  Run search
+                </button>
+                <button
+                  className="secondary-button"
+                  type="button"
+                  disabled={!canCancelSearch}
+                  onClick={cancelSearch}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+            <div className="field search-pattern-field">
+              <input
+                id="search-pattern"
+                value={activeNotebook.query}
+                placeholder="Search for an exact substring"
+                onChange={(event) => updateActiveNotebook("query", event.target.value)}
+              />
+            </div>
+            <div className="search-summary">
+              <span className={`search-status status-${currentSearchState.status}`}>
+                {searchStatusLabel(currentSearchState.status)}
+              </span>
+              <span>{currentSearchState.progress.matchesFound} matches</span>
+              <span>{currentSearchState.progress.objectsScanned} objects</span>
+              <span>{currentSearchState.progress.bytesScanned} bytes scanned</span>
+              <span>
+                {currentSearchState.connected ? "Live stream connected" : "Stream idle"}
+              </span>
+            </div>
+            {currentSearchState.errorMessage ? (
+              <p className="field-error">{currentSearchState.errorMessage}</p>
+            ) : null}
+            <div className="search-results">
+              {currentSearchState.results.length === 0 ? (
+                <div className="search-results-empty">
+                  {currentSearchState.status === "idle"
+                    ? "Run a search to see live results."
+                    : "No matches yet."}
+                </div>
+              ) : (
+                currentSearchState.results.map((result, index) => (
+                  <div
+                    key={`${result.objectKey}:${result.lineNumber}:${index}`}
+                    className="search-result-row"
+                  >
+                    <div className="search-result-meta">
+                      <span>{result.objectKey}</span>
+                      <span>line {result.lineNumber}</span>
+                      {result.timestampText ? <span>{result.timestampText}</span> : null}
+                    </div>
+                    <code className="search-result-line">{result.lineText}</code>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
         </section>
       </section>
     </main>
