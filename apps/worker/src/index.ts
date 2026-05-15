@@ -154,6 +154,52 @@ async function createS3Client(profile: string) {
   });
 }
 
+function isRetryableCredentialError(error: unknown) {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+
+  const candidate = error as {
+    name?: string;
+    Code?: string;
+    code?: string;
+    message?: string;
+  };
+  const code = candidate.name ?? candidate.Code ?? candidate.code ?? "";
+  const message = candidate.message ?? "";
+
+  return (
+    code === "ExpiredToken" ||
+    code === "InvalidAccessKeyId" ||
+    code === "RequestExpired" ||
+    code === "CredentialsProviderError" ||
+    message.includes("ExpiredToken") ||
+    message.includes("InvalidAccessKeyId") ||
+    message.includes("The security token included in the request is expired")
+  );
+}
+
+async function sendWithCredentialRefresh<T>({
+  clientRef,
+  profile,
+  operation,
+}: {
+  clientRef: { current: S3Client };
+  profile: string;
+  operation: (client: S3Client) => Promise<T>;
+}) {
+  try {
+    return await operation(clientRef.current);
+  } catch (error) {
+    if (!isRetryableCredentialError(error)) {
+      throw error;
+    }
+
+    clientRef.current = await createS3Client(profile);
+    return operation(clientRef.current);
+  }
+}
+
 function escapeRegExp(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -414,7 +460,7 @@ async function flushMatches(jobId: string, matches: SearchMatch[]) {
 }
 
 async function processObject({
-  client,
+  clientRef,
   job,
   objectKey,
   relativePath,
@@ -425,7 +471,7 @@ async function processObject({
   queryStartEpochMs,
   queryEndEpochMs,
 }: {
-  client: S3Client;
+  clientRef: { current: S3Client };
   job: SearchJob;
   objectKey: string;
   relativePath: string;
@@ -467,15 +513,20 @@ async function processObject({
   }
 
   const controller = new AbortController();
-  const response = await client.send(
-    new GetObjectCommand({
-      Bucket: job.source.bucket,
-      Key: objectKey,
-    }),
-    {
-      abortSignal: controller.signal,
-    },
-  );
+  const response = await sendWithCredentialRefresh({
+    clientRef,
+    profile: job.source.awsProfile,
+    operation: (client) =>
+      client.send(
+        new GetObjectCommand({
+          Bucket: job.source.bucket,
+          Key: objectKey,
+        }),
+        {
+          abortSignal: controller.signal,
+        },
+      ),
+  });
 
   const body = response.Body as AsyncIterable<Uint8Array | Buffer | string> | undefined;
 
@@ -628,7 +679,9 @@ async function processObject({
 }
 
 async function runSearchJob(job: SearchJob) {
-  const client = await createS3Client(job.source.awsProfile);
+  const clientRef = {
+    current: await createS3Client(job.source.awsProfile),
+  };
   const progress = { ...job.progress };
   const pendingMatches: SearchMatch[] = [];
   const lastProgressAt = { value: Date.now() };
@@ -651,14 +704,19 @@ async function runSearchJob(job: SearchJob) {
       return;
     }
 
-    const response = await client.send(
-      new ListObjectsV2Command({
-        Bucket: job.source.bucket,
-        Prefix: job.source.rootPrefix.trim() || undefined,
-        ContinuationToken: continuationToken,
-        MaxKeys: 250,
-      }),
-    );
+    const response = await sendWithCredentialRefresh({
+      clientRef,
+      profile: job.source.awsProfile,
+      operation: (client) =>
+        client.send(
+          new ListObjectsV2Command({
+            Bucket: job.source.bucket,
+            Prefix: job.source.rootPrefix.trim() || undefined,
+            ContinuationToken: continuationToken,
+            MaxKeys: 250,
+          }),
+        ),
+    });
 
     const objectKeys = (response.Contents ?? [])
       .map((entry: { Key?: string }) => entry.Key)
@@ -674,7 +732,7 @@ async function runSearchJob(job: SearchJob) {
       const relativePath = rootPrefix ? objectKey.slice(rootPrefix.length) : objectKey;
 
       await processObject({
-        client,
+        clientRef,
         job,
         objectKey,
         relativePath,

@@ -1362,11 +1362,7 @@ export default function HomePage() {
             (currentFilter?.mode === "range" ? currentFilter.end : ""),
         };
 
-        if (!nextFilter.start && !nextFilter.end) {
-          delete nextFilters[key];
-        } else {
-          nextFilters[key] = nextFilter;
-        }
+        nextFilters[key] = nextFilter;
 
         return {
           ...notebook,
