@@ -4,10 +4,12 @@ import {
   S3Client,
 } from "@aws-sdk/client-s3";
 import {
+  appendJobResults,
   appendJobEvent,
   cancelJob,
   claimNextQueuedJob,
   completeJob,
+  countJobResults,
   deleteCacheChunk,
   deleteCacheChunksForObject,
   ensureRuntimeDirectories,
@@ -21,6 +23,7 @@ import {
   isJobCancellationRequested,
   listCacheChunksForObject,
   listCacheEvictionCandidates,
+  pauseJob,
   touchCacheChunk,
   upsertCacheChunk,
   updateJobProgress,
@@ -313,9 +316,10 @@ async function flushMatches(jobId: string, matches: SearchMatch[]) {
     return;
   }
 
-  appendJobEvent(jobId, "match.batch", {
-    count: matches.length,
-    results: matches,
+  const added = appendJobResults(jobId, matches);
+  appendJobEvent(jobId, "results.available", {
+    count: added,
+    totalResults: countJobResults(jobId),
   });
   matches.length = 0;
 }
@@ -760,7 +764,7 @@ async function runSearchJob(job: SearchJob) {
   const pendingMatches: SearchMatch[] = [];
   const lastProgressAt = { value: Date.now() };
   const lastMatchAt = { value: Date.now() };
-  let continuationToken: string | undefined;
+  let continuationToken = job.scanContinuationToken.trim() || undefined;
   const queryStartEpochMs = parseQueryTimestamp(
     job.startTime,
     job.timeConfig.timezone,
@@ -840,7 +844,21 @@ async function runSearchJob(job: SearchJob) {
       });
     }
 
+    await flushMatches(job.id, pendingMatches);
+    await flushProgress(job.id, progress);
+
     continuationToken = response.NextContinuationToken ?? undefined;
+
+    const latestJob = getJob(job.id);
+
+    if (
+      continuationToken &&
+      latestJob &&
+      countJobResults(job.id) >= latestJob.requestedResultsCount
+    ) {
+      pauseJob(job.id, continuationToken);
+      return;
+    }
 
     if (!continuationToken) {
       break;

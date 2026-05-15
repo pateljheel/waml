@@ -6,6 +6,7 @@ export type QueryMode = z.infer<typeof queryModeSchema>;
 export const searchJobStatusSchema = z.enum([
   "queued",
   "running",
+  "paused",
   "cancelling",
   "cancelled",
   "completed",
@@ -165,6 +166,8 @@ export const searchJobSchema = z.object({
   notebookId: z.string().min(1),
   mode: queryModeSchema.default(DEFAULT_QUERY_MODE),
   pattern: z.string().min(1),
+  pageSize: z.number().int().positive().default(100),
+  requestedResultsCount: z.number().int().nonnegative().default(200),
   searchOptions: searchOptionsSchema.default({}),
   startTime: z.string().default(""),
   endTime: z.string().default(""),
@@ -182,6 +185,7 @@ export const searchJobSchema = z.object({
   cancelRequestedAt: z.string().nullable().default(null),
   startedAt: z.string().nullable().default(null),
   finishedAt: z.string().nullable().default(null),
+  scanContinuationToken: z.string().default(""),
   createdAt: z.string().min(1),
   updatedAt: z.string().min(1),
 });
@@ -226,10 +230,12 @@ export const searchJobEventTypeSchema = z.enum([
   "job.queued",
   "job.started",
   "job.progress",
+  "job.paused",
   "job.cancelling",
   "job.cancelled",
   "job.completed",
   "job.failed",
+  "results.available",
   "cache.hit",
   "cache.miss",
   "cache.write",
@@ -252,6 +258,15 @@ export const searchJobEventSchema = z.object({
 });
 
 export type SearchJobEvent = z.infer<typeof searchJobEventSchema>;
+
+export const searchResultsPageSchema = z.object({
+  page: z.number().int().positive(),
+  pageSize: z.number().int().positive(),
+  totalResults: z.number().int().nonnegative(),
+  results: z.array(searchMatchSchema),
+});
+
+export type SearchResultsPage = z.infer<typeof searchResultsPageSchema>;
 
 export {
   deriveCoarseTimeRangeFromMappings,

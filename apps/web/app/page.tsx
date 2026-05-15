@@ -38,6 +38,7 @@ type Notebook = {
   >;
   partitionFilters: PrefixFilters;
   query: string;
+  pageSize: number;
   startTime: string;
   endTime: string;
   range: string;
@@ -62,6 +63,10 @@ type NotebookSearchState = {
     chunksScanned: number;
     matchesFound: number;
   };
+  page: number;
+  pageSize: number;
+  totalResults: number;
+  loadingPage: boolean;
   results: SearchMatch[];
   cache: {
     hits: number;
@@ -125,6 +130,7 @@ const initialNotebooks: Notebook[] = [
     partitionOverrides: {},
     partitionFilters: {},
     query: 'timeout while awaiting headers service="checkout-api"',
+    pageSize: 100,
     startTime: "",
     endTime: "",
     range: "Last 90 min",
@@ -147,6 +153,7 @@ const initialNotebooks: Notebook[] = [
     partitionOverrides: {},
     partitionFilters: {},
     query: 'token refresh failed service="auth-service"',
+    pageSize: 100,
     startTime: "",
     endTime: "",
     range: "Today",
@@ -169,6 +176,7 @@ const initialNotebooks: Notebook[] = [
     partitionOverrides: {},
     partitionFilters: {},
     query: 'consumer lag service="worker-ingest"',
+    pageSize: 100,
     startTime: "",
     endTime: "",
     range: "May 2026",
@@ -194,6 +202,8 @@ function searchStatusLabel(status: NotebookSearchState["status"]) {
       return "Queued";
     case "running":
       return "Running";
+    case "paused":
+      return "Paused";
     case "cancelling":
       return "Cancelling";
     case "cancelled":
@@ -217,6 +227,10 @@ function createEmptySearchState(): NotebookSearchState {
       chunksScanned: 0,
       matchesFound: 0,
     },
+    page: 1,
+    pageSize: 100,
+    totalResults: 0,
+    loadingPage: false,
     results: [],
     cache: {
       hits: 0,
@@ -270,6 +284,7 @@ function normalizeNotebook(notebook: Partial<Notebook> & Pick<Notebook, "id" | "
     partitionOverrides: {},
     partitionFilters: {},
     query: "",
+    pageSize: 100,
     startTime: "",
     endTime: "",
     range: "",
@@ -561,6 +576,118 @@ export default function HomePage() {
     }
   }
 
+  async function fetchResultsPage(
+    notebookId: string,
+    jobId: string,
+    page: number,
+    pageSize: number,
+  ) {
+    setSearchState(notebookId, (current) => ({
+      ...current,
+      loadingPage: true,
+      errorMessage: null,
+    }));
+
+    const response = await fetch(
+      `/api/search/${jobId}/results?page=${page}&pageSize=${pageSize}`,
+      {
+        cache: "no-store",
+      },
+    );
+    const payload = (await response.json()) as {
+      page?: number;
+      pageSize?: number;
+      totalResults?: number;
+      results?: SearchMatch[];
+      job?: SearchJob;
+      error?: string;
+    };
+
+    if (!response.ok || !payload.job) {
+      setSearchState(notebookId, (current) => ({
+        ...current,
+        loadingPage: false,
+        errorMessage: payload.error ?? "Failed to load results",
+      }));
+      return;
+    }
+
+    setSearchState(notebookId, (current) => ({
+      ...current,
+      progress: payload.job?.progress ?? current.progress,
+      status: payload.job?.status ?? current.status,
+      page: payload.page ?? page,
+      pageSize: payload.pageSize ?? pageSize,
+      totalResults: payload.totalResults ?? current.totalResults,
+      results: payload.results ?? [],
+      loadingPage: false,
+    }));
+  }
+
+  async function loadNextResultsPage() {
+    const currentSearch = searchStateByNotebook[activeNotebook.id];
+
+    if (!currentSearch?.jobId) {
+      return;
+    }
+
+    const nextPage = currentSearch.page + 1;
+    const bufferedResultsNeeded = nextPage * currentSearch.pageSize;
+
+    if (bufferedResultsNeeded <= currentSearch.totalResults) {
+      await fetchResultsPage(
+        activeNotebook.id,
+        currentSearch.jobId,
+        nextPage,
+        currentSearch.pageSize,
+      );
+      return;
+    }
+
+    const response = await fetch(`/api/search/${currentSearch.jobId}/more`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        additionalResults: currentSearch.pageSize,
+      }),
+    });
+    const payload = (await response.json()) as {
+      job?: SearchJob;
+      error?: string;
+    };
+
+    if (!response.ok || !payload.job) {
+      setSearchState(activeNotebook.id, (current) => ({
+        ...current,
+        errorMessage: payload.error ?? "Failed to request more results",
+      }));
+      return;
+    }
+
+    setSearchState(activeNotebook.id, (current) => ({
+      ...current,
+      status: payload.job?.status ?? current.status,
+      loadingPage: true,
+    }));
+  }
+
+  async function loadPreviousResultsPage() {
+    const currentSearch = searchStateByNotebook[activeNotebook.id];
+
+    if (!currentSearch?.jobId || currentSearch.page <= 1) {
+      return;
+    }
+
+    await fetchResultsPage(
+      activeNotebook.id,
+      currentSearch.jobId,
+      currentSearch.page - 1,
+      currentSearch.pageSize,
+    );
+  }
+
   function openSearchStream(notebookId: string, jobId: string) {
     closeSearchStream(notebookId);
     const source = new EventSource(`/api/search/${jobId}/events`);
@@ -604,9 +731,20 @@ export default function HomePage() {
           }
         }
 
-        if (message.type === "match.batch") {
-          const results = (message.payload.results as SearchMatch[] | undefined) ?? [];
-          next.results = [...next.results, ...results].slice(-500);
+        if (message.type === "results.available") {
+          const totalResults =
+            (message.payload.totalResults as number | undefined) ??
+            current.totalResults;
+          next.totalResults = totalResults;
+
+          if (current.jobId) {
+            void fetchResultsPage(
+              notebookId,
+              current.jobId,
+              current.page,
+              current.pageSize,
+            );
+          }
         }
 
         if (
@@ -655,6 +793,11 @@ export default function HomePage() {
         if (message.type === "job.cancelling") {
           next.status = "cancelling";
           setNotebookStatus(notebookId, "running");
+        }
+
+        if (message.type === "job.paused") {
+          next.status = "paused";
+          setNotebookStatus(notebookId, "idle");
         }
 
         if (message.type === "job.cancelled") {
@@ -713,6 +856,7 @@ export default function HomePage() {
         notebookId: activeNotebook.id,
         mode: activeNotebook.queryMode,
         pattern,
+        pageSize: activeNotebook.pageSize,
         startTime: activeNotebook.startTime,
         endTime: activeNotebook.endTime,
         source: {
@@ -745,6 +889,10 @@ export default function HomePage() {
       jobId: payload.job.id,
       status: payload.job.status,
       progress: payload.job.progress,
+      page: 1,
+      pageSize: payload.job.pageSize,
+      totalResults: 0,
+      loadingPage: false,
       results: [],
       cache: {
         hits: 0,
@@ -864,6 +1012,7 @@ export default function HomePage() {
       partitionOverrides: activeNotebook.partitionOverrides ?? {},
       partitionFilters: clonePrefixFilters(activeNotebook.partitionFilters ?? {}),
       query: "",
+      pageSize: activeNotebook.pageSize,
       startTime: activeNotebook.startTime,
       endTime: activeNotebook.endTime,
       range: "Last 60 min",
@@ -1432,6 +1581,20 @@ export default function HomePage() {
     (currentSearchState.status === "queued" ||
       currentSearchState.status === "running" ||
       currentSearchState.status === "cancelling");
+  const hasPreviousResultsPage = currentSearchState.page > 1;
+  const hasBufferedNextResultsPage =
+    currentSearchState.page * currentSearchState.pageSize <
+    currentSearchState.totalResults;
+  const canAskForMoreResults =
+    currentSearchState.jobId !== null &&
+    !currentSearchState.loadingPage &&
+    (currentSearchState.status === "paused" ||
+      currentSearchState.status === "running" ||
+      currentSearchState.status === "queued");
+  const canLoadNextResultsPage =
+    currentSearchState.jobId !== null &&
+    !currentSearchState.loadingPage &&
+    (hasBufferedNextResultsPage || canAskForMoreResults);
   const canInvalidateCache =
     activeNotebook.bucket.trim().length > 0 &&
     currentSearchState.status !== "queued" &&
@@ -2703,6 +2866,21 @@ export default function HomePage() {
                   }
                 />
               </div>
+              <div className="field">
+                <label htmlFor="search-page-size">Page size</label>
+                <select
+                  id="search-page-size"
+                  className="control"
+                  value={activeNotebook.pageSize}
+                  onChange={(event) =>
+                    updateActiveNotebook("pageSize", Number(event.target.value))
+                  }
+                >
+                  <option value={50}>50</option>
+                  <option value={100}>100</option>
+                  <option value={250}>250</option>
+                </select>
+              </div>
             </div>
             <label className="search-option-toggle">
               <input
@@ -2724,6 +2902,9 @@ export default function HomePage() {
               <span>{currentSearchState.progress.matchesFound} matches</span>
               <span>{currentSearchState.progress.objectsScanned} objects</span>
               <span>{currentSearchState.progress.bytesScanned} bytes scanned</span>
+              <span>
+                page {currentSearchState.page} · {currentSearchState.totalResults} buffered
+              </span>
               <span>
                 cache {currentSearchState.cache.hits} hit / {currentSearchState.cache.misses} miss
               </span>
@@ -2779,10 +2960,34 @@ export default function HomePage() {
               </div>
             ) : null}
             <div className="search-results">
+              <div className="pager-row search-results-pager">
+                <button
+                  type="button"
+                  className="secondary-button"
+                  onClick={loadPreviousResultsPage}
+                  disabled={!hasPreviousResultsPage || currentSearchState.loadingPage}
+                >
+                  Prev page
+                </button>
+                <button
+                  type="button"
+                  className="secondary-button"
+                  onClick={loadNextResultsPage}
+                  disabled={!canLoadNextResultsPage}
+                >
+                  {currentSearchState.loadingPage
+                    ? "Loading..."
+                    : hasBufferedNextResultsPage
+                      ? "Next page"
+                      : "Scan more"}
+                </button>
+              </div>
               {currentSearchState.results.length === 0 ? (
                 <div className="search-results-empty">
                   {currentSearchState.status === "idle"
                     ? "Run a search to see live results."
+                    : currentSearchState.loadingPage
+                      ? "Loading buffered results..."
                     : "No matches yet."}
                 </div>
               ) : (

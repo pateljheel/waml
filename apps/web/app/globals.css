@@ -539,7 +539,7 @@ select:focus {
 
 .search-time-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px 10px;
 }
 
@@ -597,6 +597,11 @@ select:focus {
   gap: 6px;
   max-height: 420px;
   overflow-y: auto;
+}
+
+.search-results-pager {
+  justify-content: flex-start;
+  margin-bottom: 2px;
 }
 
 .search-results-empty {

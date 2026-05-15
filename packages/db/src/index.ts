@@ -7,6 +7,7 @@ import type {
   PrefixFilters,
   SearchJob,
   SearchJobEvent,
+  SearchMatch,
   SearchJobEventType,
   SearchJobStatus,
 } from "@waml/shared";
@@ -51,6 +52,8 @@ type JobRow = {
   notebook_id: string;
   mode: SearchJob["mode"];
   pattern: string;
+  page_size: number;
+  requested_results_count: number;
   search_options_json: string;
   time_config_json: string;
   start_time: string;
@@ -67,6 +70,7 @@ type JobRow = {
   cancel_requested_at: string | null;
   started_at: string | null;
   finished_at: string | null;
+  scan_continuation_token: string;
   created_at: string;
   updated_at: string;
 };
@@ -157,6 +161,8 @@ export function initializeDatabase() {
       notebook_id TEXT NOT NULL DEFAULT '',
       mode TEXT NOT NULL,
       pattern TEXT NOT NULL,
+      page_size INTEGER NOT NULL DEFAULT 100,
+      requested_results_count INTEGER NOT NULL DEFAULT 200,
       search_options_json TEXT NOT NULL DEFAULT '{}',
       time_config_json TEXT NOT NULL DEFAULT '{}',
       start_time TEXT NOT NULL DEFAULT '',
@@ -173,6 +179,7 @@ export function initializeDatabase() {
       cancel_requested_at TEXT,
       started_at TEXT,
       finished_at TEXT,
+      scan_continuation_token TEXT NOT NULL DEFAULT '',
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
@@ -265,6 +272,18 @@ export function initializeDatabase() {
     "custom_path_pattern",
     "custom_path_pattern TEXT NOT NULL DEFAULT ''",
   );
+  ensureColumn(
+    db,
+    "jobs",
+    "page_size",
+    "page_size INTEGER NOT NULL DEFAULT 100",
+  );
+  ensureColumn(
+    db,
+    "jobs",
+    "requested_results_count",
+    "requested_results_count INTEGER NOT NULL DEFAULT 200",
+  );
   ensureColumn(db, "jobs", "bytes_scanned", "bytes_scanned INTEGER NOT NULL DEFAULT 0");
   ensureColumn(
     db,
@@ -288,6 +307,12 @@ export function initializeDatabase() {
   ensureColumn(db, "jobs", "cancel_requested_at", "cancel_requested_at TEXT");
   ensureColumn(db, "jobs", "started_at", "started_at TEXT");
   ensureColumn(db, "jobs", "finished_at", "finished_at TEXT");
+  ensureColumn(
+    db,
+    "jobs",
+    "scan_continuation_token",
+    "scan_continuation_token TEXT NOT NULL DEFAULT ''",
+  );
   ensureColumn(db, "chunks", "bucket", "bucket TEXT NOT NULL DEFAULT ''");
   ensureColumn(
     db,
@@ -330,6 +355,7 @@ function normalizeStatus(status: string): SearchJobStatus {
   if (
     status === "queued" ||
     status === "running" ||
+    status === "paused" ||
     status === "cancelling" ||
     status === "cancelled" ||
     status === "completed" ||
@@ -347,6 +373,8 @@ function mapJobRow(row: JobRow): SearchJob {
     notebookId: row.notebook_id,
     mode: row.mode,
     pattern: row.pattern,
+    pageSize: row.page_size ?? 100,
+    requestedResultsCount: row.requested_results_count ?? 200,
     searchOptions: JSON.parse(row.search_options_json || "{}") as SearchJob["searchOptions"],
     timeConfig: JSON.parse(row.time_config_json || "{}") as SearchJob["timeConfig"],
     startTime: row.start_time,
@@ -365,6 +393,7 @@ function mapJobRow(row: JobRow): SearchJob {
     cancelRequestedAt: row.cancel_requested_at,
     startedAt: row.started_at,
     finishedAt: row.finished_at,
+    scanContinuationToken: row.scan_continuation_token ?? "",
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -378,6 +407,8 @@ export function createJob(input: CreateSearchJobInput): SearchJob {
     notebookId: input.notebookId,
     mode: input.mode,
     pattern: input.pattern,
+    pageSize: input.pageSize ?? 100,
+    requestedResultsCount: input.requestedResultsCount ?? (input.pageSize ?? 100) * 2,
     searchOptions: input.searchOptions ?? {
       caseSensitive: false,
     },
@@ -402,27 +433,30 @@ export function createJob(input: CreateSearchJobInput): SearchJob {
     cancelRequestedAt: null,
     startedAt: null,
     finishedAt: null,
+    scanContinuationToken: "",
     createdAt: now,
     updatedAt: now,
   };
 
   db.prepare(
     `INSERT INTO jobs (
-      id, notebook_id, mode, pattern, search_options_json, time_config_json, start_time, end_time, source_json,
+      id, notebook_id, mode, pattern, page_size, requested_results_count, search_options_json, time_config_json, start_time, end_time, source_json,
       prefix_filters_json, custom_path_pattern, status, bytes_scanned,
       objects_scanned, chunks_scanned, matches_found, error_message,
-      cancel_requested_at, started_at, finished_at, created_at, updated_at
+      cancel_requested_at, started_at, finished_at, scan_continuation_token, created_at, updated_at
     ) VALUES (
-      @id, @notebookId, @mode, @pattern, @searchOptionsJson, @timeConfigJson, @startTime, @endTime, @sourceJson,
+      @id, @notebookId, @mode, @pattern, @pageSize, @requestedResultsCount, @searchOptionsJson, @timeConfigJson, @startTime, @endTime, @sourceJson,
       @prefixFiltersJson, @customPathPattern, @status, @bytesScanned,
       @objectsScanned, @chunksScanned, @matchesFound, @errorMessage,
-      @cancelRequestedAt, @startedAt, @finishedAt, @createdAt, @updatedAt
+      @cancelRequestedAt, @startedAt, @finishedAt, @scanContinuationToken, @createdAt, @updatedAt
     )`,
   ).run({
     id: job.id,
     notebookId: job.notebookId,
     mode: job.mode,
     pattern: job.pattern,
+    pageSize: job.pageSize,
+    requestedResultsCount: job.requestedResultsCount,
     searchOptionsJson: JSON.stringify(job.searchOptions),
     timeConfigJson: JSON.stringify(job.timeConfig),
     startTime: job.startTime,
@@ -439,6 +473,7 @@ export function createJob(input: CreateSearchJobInput): SearchJob {
     cancelRequestedAt: job.cancelRequestedAt,
     startedAt: job.startedAt,
     finishedAt: job.finishedAt,
+    scanContinuationToken: job.scanContinuationToken,
     createdAt: job.createdAt,
     updatedAt: job.updatedAt,
   });
@@ -565,6 +600,79 @@ export function appendJobEvent(
   } satisfies SearchJobEvent;
 }
 
+export function appendJobResults(jobId: string, matches: SearchMatch[]) {
+  if (matches.length === 0) {
+    return 0;
+  }
+
+  const db = initializeDatabase();
+  const now = new Date().toISOString();
+  const current = db
+    .prepare(
+      "SELECT COALESCE(MAX(sequence_no), 0) AS sequenceNo FROM job_results WHERE job_id = ?",
+    )
+    .get(jobId) as { sequenceNo: number };
+  let sequenceNo = current.sequenceNo ?? 0;
+
+  const insert = db.prepare(
+    `INSERT INTO job_results (
+      job_id, sequence_no, object_key, line_number, timestamp_text, line_text, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  );
+
+  for (const match of matches) {
+    sequenceNo += 1;
+    insert.run(
+      jobId,
+      sequenceNo,
+      match.objectKey,
+      match.lineNumber,
+      match.timestampText ?? null,
+      match.lineText,
+      now,
+    );
+  }
+
+  return matches.length;
+}
+
+export function countJobResults(jobId: string) {
+  const db = initializeDatabase();
+  const row = db
+    .prepare("SELECT COUNT(*) AS total FROM job_results WHERE job_id = ?")
+    .get(jobId) as { total: number };
+
+  return row.total ?? 0;
+}
+
+export function listJobResultsPage(jobId: string, page: number, pageSize: number) {
+  const db = initializeDatabase();
+  const safePage = Math.max(1, page);
+  const safePageSize = Math.max(1, pageSize);
+  const offset = (safePage - 1) * safePageSize;
+  const rows = db
+    .prepare(
+      `SELECT object_key, line_number, timestamp_text, line_text
+       FROM job_results
+       WHERE job_id = ?
+       ORDER BY sequence_no ASC
+       LIMIT ? OFFSET ?`,
+    )
+    .all(jobId, safePageSize, offset) as Array<{
+      object_key: string;
+      line_number: number;
+      timestamp_text: string | null;
+      line_text: string;
+    }>;
+
+  return rows.map((row) => ({
+    objectKey: row.object_key,
+    lineNumber: row.line_number,
+    timestampText: row.timestamp_text ?? undefined,
+    lineText: row.line_text,
+  }));
+}
+
 export function updateJobProgress(
   jobId: string,
   progress: Partial<SearchJob["progress"]>,
@@ -572,6 +680,8 @@ export function updateJobProgress(
     status?: SearchJobStatus;
     errorMessage?: string | null;
     finishedAt?: string | null;
+    scanContinuationToken?: string;
+    requestedResultsCount?: number;
   } = {},
 ) {
   const db = initializeDatabase();
@@ -592,7 +702,8 @@ export function updateJobProgress(
   db.prepare(
     `UPDATE jobs
      SET bytes_scanned = ?, objects_scanned = ?, chunks_scanned = ?,
-         matches_found = ?, status = ?, error_message = ?, finished_at = ?, updated_at = ?
+         matches_found = ?, status = ?, error_message = ?, finished_at = ?,
+         scan_continuation_token = ?, requested_results_count = ?, updated_at = ?
      WHERE id = ?`,
   ).run(
     nextProgress.bytesScanned,
@@ -602,6 +713,8 @@ export function updateJobProgress(
     extra.status ?? existing.status,
     extra.errorMessage ?? existing.errorMessage,
     extra.finishedAt ?? existing.finishedAt,
+    extra.scanContinuationToken ?? existing.scanContinuationToken,
+    extra.requestedResultsCount ?? existing.requestedResultsCount,
     now,
     jobId,
   );
@@ -656,6 +769,7 @@ export function completeJob(jobId: string) {
       status: "completed",
       finishedAt: now,
       errorMessage: null,
+      scanContinuationToken: "",
     },
   );
 
@@ -678,6 +792,7 @@ export function failJob(jobId: string, errorMessage: string) {
       status: "failed",
       finishedAt: now,
       errorMessage,
+      scanContinuationToken: "",
     },
   );
 
@@ -699,6 +814,7 @@ export function cancelJob(jobId: string) {
     {
       status: "cancelled",
       finishedAt: now,
+      scanContinuationToken: "",
     },
   );
 
@@ -710,6 +826,65 @@ export function cancelJob(jobId: string) {
   }
 
   return job;
+}
+
+export function pauseJob(jobId: string, scanContinuationToken: string) {
+  const now = new Date().toISOString();
+  const job = updateJobProgress(
+    jobId,
+    {},
+    {
+      status: "paused",
+      scanContinuationToken,
+      finishedAt: null,
+    },
+  );
+
+  if (job) {
+    appendJobEvent(jobId, "job.paused", {
+      bufferedResults: countJobResults(jobId),
+      scanContinuationToken,
+      progress: job.progress,
+    });
+  }
+
+  return job;
+}
+
+export function requestMoreResults(jobId: string, additionalResults: number) {
+  const existing = getJob(jobId);
+
+  if (!existing) {
+    return null;
+  }
+
+  if (
+    existing.status === "completed" ||
+    existing.status === "failed" ||
+    existing.status === "cancelled"
+  ) {
+    return existing;
+  }
+
+  const nextRequestedResultsCount =
+    Math.max(0, existing.requestedResultsCount) + Math.max(1, additionalResults);
+  const now = new Date().toISOString();
+  const db = initializeDatabase();
+  const nextStatus = existing.status === "paused" ? "queued" : existing.status;
+
+  db.prepare(
+    `UPDATE jobs
+     SET requested_results_count = ?, status = ?, updated_at = ?
+     WHERE id = ?`,
+  ).run(nextRequestedResultsCount, nextStatus, now, jobId);
+
+  appendJobEvent(jobId, "results.available", {
+    requestedResultsCount: nextRequestedResultsCount,
+    bufferedResults: countJobResults(jobId),
+    resumed: existing.status === "paused",
+  });
+
+  return getJob(jobId);
 }
 
 export function getCacheChunk(chunkPk: string) {
