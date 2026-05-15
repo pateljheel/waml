@@ -31,6 +31,62 @@ function toIso(epochMs: number) {
   return new Date(epochMs).toISOString();
 }
 
+function getFormatter(timeZone: string) {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
+}
+
+function getTimeZoneOffsetMs(timeZone: string, epochMs: number) {
+  const parts = getFormatter(timeZone).formatToParts(new Date(epochMs));
+  const values = Object.fromEntries(
+    parts
+      .filter((part) => part.type !== "literal")
+      .map((part) => [part.type, part.value]),
+  ) as Record<string, string>;
+
+  const asUtc = Date.UTC(
+    Number(values.year),
+    Number(values.month) - 1,
+    Number(values.day),
+    Number(values.hour),
+    Number(values.minute),
+    Number(values.second),
+    0,
+  );
+
+  return asUtc - epochMs;
+}
+
+function zonedDateTimeToUtc(parts: ParsedParts, timeZone: string) {
+  const utcGuess = Date.UTC(
+    parts.year ?? 0,
+    (parts.month ?? 1) - 1,
+    parts.day ?? 1,
+    parts.hour ?? 0,
+    parts.minute ?? 0,
+    parts.second ?? 0,
+    0,
+  );
+
+  let offset = getTimeZoneOffsetMs(timeZone, utcGuess);
+  let resolved = utcGuess - offset;
+  const refinedOffset = getTimeZoneOffsetMs(timeZone, resolved);
+
+  if (refinedOffset !== offset) {
+    resolved = utcGuess - refinedOffset;
+  }
+
+  return resolved;
+}
+
 function parseInteger(value: string, length?: number) {
   if (length && value.length !== length) {
     return null;
@@ -204,48 +260,96 @@ function mergeParts(target: ParsedParts, source: ParsedParts) {
   return next;
 }
 
-function partsToRange(parts: ParsedParts) {
+function addPrecisionToParts(parts: ParsedParts) {
+  const next = {
+    year: parts.year ?? 0,
+    month: parts.month ?? 1,
+    day: parts.day ?? 1,
+    hour: parts.hour ?? 0,
+    minute: parts.minute ?? 0,
+    second: parts.second ?? 0,
+  };
+
+  switch (parts.precision ?? "year") {
+    case "year":
+      next.year += 1;
+      break;
+    case "month":
+      next.month += 1;
+      if (next.month > 12) {
+        next.month = 1;
+        next.year += 1;
+      }
+      break;
+    case "day": {
+      const date = new Date(Date.UTC(next.year, next.month - 1, next.day));
+      date.setUTCDate(date.getUTCDate() + 1);
+      next.year = date.getUTCFullYear();
+      next.month = date.getUTCMonth() + 1;
+      next.day = date.getUTCDate();
+      break;
+    }
+    case "hour": {
+      const date = new Date(
+        Date.UTC(next.year, next.month - 1, next.day, next.hour),
+      );
+      date.setUTCHours(date.getUTCHours() + 1);
+      next.year = date.getUTCFullYear();
+      next.month = date.getUTCMonth() + 1;
+      next.day = date.getUTCDate();
+      next.hour = date.getUTCHours();
+      break;
+    }
+    case "minute": {
+      const date = new Date(
+        Date.UTC(next.year, next.month - 1, next.day, next.hour, next.minute),
+      );
+      date.setUTCMinutes(date.getUTCMinutes() + 1);
+      next.year = date.getUTCFullYear();
+      next.month = date.getUTCMonth() + 1;
+      next.day = date.getUTCDate();
+      next.hour = date.getUTCHours();
+      next.minute = date.getUTCMinutes();
+      break;
+    }
+    case "second": {
+      const date = new Date(
+        Date.UTC(
+          next.year,
+          next.month - 1,
+          next.day,
+          next.hour,
+          next.minute,
+          next.second,
+        ),
+      );
+      date.setUTCSeconds(date.getUTCSeconds() + 1);
+      next.year = date.getUTCFullYear();
+      next.month = date.getUTCMonth() + 1;
+      next.day = date.getUTCDate();
+      next.hour = date.getUTCHours();
+      next.minute = date.getUTCMinutes();
+      next.second = date.getUTCSeconds();
+      break;
+    }
+  }
+
+  return next;
+}
+
+function partsToRange(parts: ParsedParts, timeZone = "UTC") {
   if (!parts.year) {
     return null;
   }
 
-  const start = Date.UTC(
-    parts.year,
-    (parts.month ?? 1) - 1,
-    parts.day ?? 1,
-    parts.hour ?? 0,
-    parts.minute ?? 0,
-    parts.second ?? 0,
-    0,
-  );
-
-  const endDate = new Date(start);
-  switch (parts.precision ?? "year") {
-    case "year":
-      endDate.setUTCFullYear(endDate.getUTCFullYear() + 1);
-      break;
-    case "month":
-      endDate.setUTCMonth(endDate.getUTCMonth() + 1);
-      break;
-    case "day":
-      endDate.setUTCDate(endDate.getUTCDate() + 1);
-      break;
-    case "hour":
-      endDate.setUTCHours(endDate.getUTCHours() + 1);
-      break;
-    case "minute":
-      endDate.setUTCMinutes(endDate.getUTCMinutes() + 1);
-      break;
-    case "second":
-      endDate.setUTCSeconds(endDate.getUTCSeconds() + 1);
-      break;
-  }
+  const start = zonedDateTimeToUtc(parts, timeZone);
+  const end = zonedDateTimeToUtc(addPrecisionToParts(parts), timeZone);
 
   return {
     startEpochMs: start,
-    endEpochMs: endDate.getTime(),
+    endEpochMs: end,
     start: toIso(start),
-    end: toIso(endDate.getTime()),
+    end: toIso(end),
   };
 }
 
@@ -283,7 +387,7 @@ function parseMappingValue(mapping: PartitionTimeMapping, value: string): Parsed
   }
 }
 
-function parseAutoTimestamp(value: string): ParsedTimestamp | null {
+function parseAutoTimestamp(value: string, timeZone = "UTC"): ParsedTimestamp | null {
   const direct = Date.parse(value);
 
   if (!Number.isNaN(direct)) {
@@ -294,7 +398,7 @@ function parseAutoTimestamp(value: string): ParsedTimestamp | null {
   }
 
   const spaced = parseWithFormat(value, "YYYY-MM-DD HH:mm:ss");
-  const range = spaced ? partsToRange(spaced) : null;
+  const range = spaced ? partsToRange(spaced, timeZone) : null;
 
   return range
     ? {
@@ -304,7 +408,11 @@ function parseAutoTimestamp(value: string): ParsedTimestamp | null {
     : null;
 }
 
-function parseTimestampText(value: string, format?: string): ParsedTimestamp | null {
+function parseTimestampText(
+  value: string,
+  format?: string,
+  timeZone = "UTC",
+): ParsedTimestamp | null {
   if (format) {
     if (format === "unix_seconds") {
       const parsed = parseInteger(value);
@@ -319,7 +427,7 @@ function parseTimestampText(value: string, format?: string): ParsedTimestamp | n
     }
 
     const parts = parseWithFormat(value, format);
-    const range = parts ? partsToRange(parts) : null;
+    const range = parts ? partsToRange(parts, timeZone) : null;
     return range
       ? {
           epochMs: range.startEpochMs,
@@ -328,12 +436,13 @@ function parseTimestampText(value: string, format?: string): ParsedTimestamp | n
       : null;
   }
 
-  return parseAutoTimestamp(value);
+  return parseAutoTimestamp(value, timeZone);
 }
 
 export function deriveCoarseTimeRangeFromMappings(
   pathMappings: PartitionTimeMapping[],
   partitionValues: Record<string, string>,
+  timeZone = "UTC",
 ) {
   let collectedParts: ParsedParts = {};
   const errors: string[] = [];
@@ -358,7 +467,7 @@ export function deriveCoarseTimeRangeFromMappings(
   }
 
   return {
-    range: partsToRange(collectedParts),
+    range: partsToRange(collectedParts, timeZone),
     errors,
   };
 }
@@ -366,6 +475,7 @@ export function deriveCoarseTimeRangeFromMappings(
 export function extractLineTimestamp(
   lineParser: LineTimestampParser,
   sampleLine: string,
+  timeZone = "UTC",
 ) {
   if (lineParser.mode === "none") {
     return {
@@ -376,7 +486,7 @@ export function extractLineTimestamp(
   }
 
   if (lineParser.mode === "auto") {
-    const parsed = sampleLine ? parseAutoTimestamp(sampleLine) : null;
+    const parsed = sampleLine ? parseAutoTimestamp(sampleLine, timeZone) : null;
 
     return {
       extractedText: sampleLine || null,
@@ -401,7 +511,11 @@ export function extractLineTimestamp(
       };
     }
 
-    const parsed = parseTimestampText(extractedText, lineParser.format);
+    const parsed = parseTimestampText(
+      extractedText,
+      lineParser.format,
+      timeZone,
+    );
 
     return {
       extractedText,
@@ -419,9 +533,27 @@ export function extractLineTimestamp(
   }
 }
 
-export function parseQueryTimestamp(value: string) {
+export function parseQueryTimestamp(value: string, timeZone = "UTC") {
   if (!value.trim()) {
     return null;
+  }
+
+  const localMatch = value.match(
+    /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/,
+  );
+
+  if (localMatch && !/[zZ]|[+-]\d{2}:\d{2}$/.test(value)) {
+    return zonedDateTimeToUtc(
+      {
+        year: Number(localMatch[1]),
+        month: Number(localMatch[2]),
+        day: Number(localMatch[3]),
+        hour: Number(localMatch[4]),
+        minute: Number(localMatch[5]),
+        second: Number(localMatch[6] ?? "0"),
+      },
+      timeZone,
+    );
   }
 
   const parsed = Date.parse(value);
@@ -432,8 +564,13 @@ export function previewTimeConfig(input: TimePreviewInput) {
   const coarseResult = deriveCoarseTimeRangeFromMappings(
     input.pathMappings,
     input.partitionValues,
+    input.timezone,
   );
-  const lineResult = extractLineTimestamp(input.lineParser, input.sampleLine);
+  const lineResult = extractLineTimestamp(
+    input.lineParser,
+    input.sampleLine,
+    input.timezone,
+  );
   const errors = [...coarseResult.errors, ...lineResult.errors];
 
   if (

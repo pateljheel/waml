@@ -350,6 +350,7 @@ async function processObject({
   const coarseTimeRange = deriveCoarseTimeRangeFromMappings(
     job.timeConfig.pathMappings,
     partitionValues,
+    job.timeConfig.timezone,
   ).range;
 
   if (!gzipObject && shouldSkipObjectByKey(objectKey)) {
@@ -446,6 +447,7 @@ async function processObject({
       const timestampResult = extractLineTimestamp(
         job.timeConfig.lineParser,
         lineText,
+        job.timeConfig.timezone,
       );
       const parsedLineTimestamp = timestampResult.lineTimestamp
         ? parseQueryTimestamp(timestampResult.lineTimestamp)
@@ -501,6 +503,7 @@ async function processObject({
       const timestampResult = extractLineTimestamp(
         job.timeConfig.lineParser,
         bufferedText,
+        job.timeConfig.timezone,
       );
       const parsedLineTimestamp = timestampResult.lineTimestamp
         ? parseQueryTimestamp(timestampResult.lineTimestamp)
@@ -537,8 +540,14 @@ async function runSearchJob(job: SearchJob) {
   const lastProgressAt = { value: Date.now() };
   const lastMatchAt = { value: Date.now() };
   let continuationToken: string | undefined;
-  const queryStartEpochMs = parseQueryTimestamp(job.startTime);
-  const queryEndEpochMs = parseQueryTimestamp(job.endTime);
+  const queryStartEpochMs = parseQueryTimestamp(
+    job.startTime,
+    job.timeConfig.timezone,
+  );
+  const queryEndEpochMs = parseQueryTimestamp(
+    job.endTime,
+    job.timeConfig.timezone,
+  );
 
   while (true) {
     if (isJobCancellationRequested(job.id)) {
