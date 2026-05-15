@@ -4,11 +4,13 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type {
   CreateSearchJobInput,
+  PrefixFilters,
   SearchJob,
   SearchJobEvent,
   SearchJobEventType,
   SearchJobStatus,
 } from "@waml/shared";
+import { normalizePrefixFilters } from "@waml/shared";
 
 function resolveRepoRoot() {
   const candidates = [
@@ -270,7 +272,7 @@ function mapJobRow(row: JobRow): SearchJob {
     startTime: row.start_time,
     endTime: row.end_time,
     source: JSON.parse(row.source_json) as SearchJob["source"],
-    prefixFilters: JSON.parse(row.prefix_filters_json) as SearchJob["prefixFilters"],
+    prefixFilters: normalizePrefixFilters(JSON.parse(row.prefix_filters_json || "{}")),
     customPathPattern: row.custom_path_pattern ?? "",
     status: normalizeStatus(row.status),
     progress: {
@@ -307,7 +309,7 @@ export function createJob(input: CreateSearchJobInput): SearchJob {
     startTime: input.startTime ?? "",
     endTime: input.endTime ?? "",
     source: input.source,
-    prefixFilters: input.prefixFilters ?? {},
+    prefixFilters: normalizePrefixFilters(input.prefixFilters),
     customPathPattern: input.customPathPattern ?? "",
     status: "queued",
     progress: {
@@ -366,6 +368,10 @@ export function createJob(input: CreateSearchJobInput): SearchJob {
   });
 
   return job;
+}
+
+export function normalizeStoredPrefixFilters(prefixFilters: unknown): PrefixFilters {
+  return normalizePrefixFilters(prefixFilters);
 }
 
 export function listJobs(): SearchJob[] {

@@ -20,6 +20,7 @@ type InferredPartition = {
   level: number;
   order: number;
 };
+const inferredValueSampleLimit = 20;
 
 const configPath = path.join(os.homedir(), ".aws", "config");
 const credentialsPath = path.join(os.homedir(), ".aws", "credentials");
@@ -335,7 +336,7 @@ function escapeRegExp(value: string) {
 function inferHivePartitionsFromPrefixes(relativePrefixes: string[]) {
   const accumulator = new Map<
     string,
-    { values: Set<string>; level: number; order: number }
+    { values: string[]; seen: Set<string>; level: number; order: number }
   >();
 
   for (const relativePrefix of relativePrefixes) {
@@ -350,11 +351,18 @@ function inferHivePartitionsFromPrefixes(relativePrefixes: string[]) {
 
       const [, key, value] = hiveMatch;
       const current = accumulator.get(key) ?? {
-        values: new Set<string>(),
+        values: [],
+        seen: new Set<string>(),
         level: index,
         order: index,
       };
-      current.values.add(value);
+      if (
+        !current.seen.has(value) &&
+        current.values.length < inferredValueSampleLimit
+      ) {
+        current.seen.add(value);
+        current.values.push(value);
+      }
       current.level = Math.min(current.level, index);
       current.order = Math.min(current.order, index);
       accumulator.set(key, current);
@@ -458,6 +466,121 @@ function inferCustomPartitionsFromPrefixes(
     level: definition.level,
     order: definition.order,
   }));
+}
+
+function extractHivePartitionValue(relativePath: string, key: string) {
+  const segments = relativePath.split("/").filter(Boolean);
+
+  for (const segment of segments) {
+    const hiveMatch = segment.match(/^([^=\/]+)=(.+)$/);
+
+    if (hiveMatch && hiveMatch[1] === key) {
+      return hiveMatch[2];
+    }
+  }
+
+  return null;
+}
+
+function extractCustomPartitionValue(
+  relativePath: string,
+  pathPattern: string,
+  key: string,
+) {
+  const compiled = compileCustomPathPattern(pathPattern);
+
+  if (!compiled.captures.some((capture) => capture.key === key)) {
+    return null;
+  }
+
+  const normalizedRelativePath = relativePath.replace(/\/+$/, "");
+  const match = normalizedRelativePath.match(compiled.regex);
+
+  if (!match) {
+    return null;
+  }
+
+  const captureIndex = compiled.captures.findIndex((capture) => capture.key === key);
+  return captureIndex >= 0 ? match[captureIndex + 1] ?? null : null;
+}
+
+export async function searchPartitionValues({
+  profile,
+  bucket,
+  rootPrefix,
+  pathPattern,
+  key,
+  search,
+  page,
+  pageSize,
+}: {
+  profile: string;
+  bucket: string;
+  rootPrefix: string;
+  pathPattern?: string;
+  key: string;
+  search: string;
+  page: number;
+  pageSize: number;
+}) {
+  const { relativePrefixes } = await collectRelativePrefixes({
+    profile,
+    bucket,
+    rootPrefix,
+    maxDepth: 6,
+    maxKeysPerLevel: 250,
+    maxPrefixesToVisit: 1000,
+  });
+
+  const normalizedSearch = search.trim().toLowerCase();
+  const trimmedPattern = pathPattern?.trim() ?? "";
+  const uniqueValues = new Set<string>();
+  let customMatched = false;
+
+  for (const relativePath of relativePrefixes) {
+    let value: string | null = null;
+
+    if (trimmedPattern) {
+      value = extractCustomPartitionValue(relativePath, trimmedPattern, key);
+      if (value !== null) {
+        customMatched = true;
+      }
+    }
+
+    if (value === null && !customMatched) {
+      value = extractHivePartitionValue(relativePath, key);
+    }
+
+    if (!value) {
+      continue;
+    }
+
+    if (
+      normalizedSearch &&
+      !value.toLowerCase().includes(normalizedSearch)
+    ) {
+      continue;
+    }
+
+    uniqueValues.add(value);
+  }
+
+  const values = [...uniqueValues].sort((left, right) => left.localeCompare(right));
+  const safePageSize = Math.max(1, pageSize);
+  const total = values.length;
+  const totalPages = Math.max(1, Math.ceil(total / safePageSize));
+  const safePage = Math.min(Math.max(1, page), totalPages);
+  const startIndex = (safePage - 1) * safePageSize;
+
+  return {
+    key,
+    values: values.slice(startIndex, startIndex + safePageSize),
+    search: normalizedSearch,
+    page: safePage,
+    pageSize: safePageSize,
+    total,
+    totalPages,
+  };
 }
 
 export async function inferPartitions({

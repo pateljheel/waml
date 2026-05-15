@@ -370,13 +370,53 @@ select:focus {
 
 .partition-chip-controls {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 124px auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   gap: 8px;
   align-items: center;
 }
 
-.partition-kind-select {
-  min-width: 0;
+.partition-value-picker .picker-menu {
+  min-width: 320px;
+}
+
+.picker-error {
+  margin-top: 8px;
+}
+
+.partition-picker-meta {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.partition-range-editor {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.partition-type-toggle {
+  display: inline-flex;
+  width: fit-content;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+  background: rgba(15, 23, 42, 0.02);
+}
+
+.partition-type-button {
+  padding: 0.45rem 0.7rem;
+  border: 0;
+  background: transparent;
+  color: var(--muted-2);
+  font-size: 0.78rem;
+}
+
+.partition-type-button.is-active {
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
 }
 
 .partition-toggle {
@@ -649,6 +689,13 @@ select:focus {
   transition: background 120ms ease, border-color 120ms ease;
 }
 
+.picker-option-selectable {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
 .picker-option:hover {
   background: rgba(15, 23, 42, 0.04);
 }
@@ -656,6 +703,11 @@ select:focus {
 .picker-option.is-selected {
   border-color: var(--border-strong);
   background: var(--accent-soft);
+}
+
+.picker-option-mark {
+  color: var(--muted);
+  font-size: 0.72rem;
 }
 
 .picker-empty {

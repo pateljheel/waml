@@ -2,12 +2,15 @@
 
 import type {
   LineTimestampParser,
+  PrefixFilterSelection,
   NotebookTimeConfig,
+  PrefixFilters,
   SearchJob,
   SearchJobStatus,
   SearchMatch,
   TimeComponent,
 } from "@waml/shared";
+import { normalizePrefixFilters } from "@waml/shared";
 import { useEffect, useRef, useState } from "react";
 
 type Notebook = {
@@ -31,7 +34,7 @@ type Notebook = {
       hidden: boolean;
     }
   >;
-  partitionFilters: Record<string, string>;
+  partitionFilters: PrefixFilters;
   query: string;
   startTime: string;
   endTime: string;
@@ -71,6 +74,17 @@ type TimePreviewState = {
   extractedText: string | null;
   lineTimestamp: string | null;
   errors: string[];
+};
+
+type PartitionValuePickerState = {
+  open: boolean;
+  search: string;
+  page: number;
+  totalPages: number;
+  totalItems: number;
+  values: string[];
+  loading: boolean;
+  error: string | null;
 };
 
 const initialNotebooks: Notebook[] = [
@@ -241,13 +255,25 @@ function normalizeNotebook(notebook: Partial<Notebook> & Pick<Notebook, "id" | "
     timeConfig: normalizedNotebook.timeConfig ?? createDefaultTimeConfig(),
     timeSampleLine: normalizedNotebook.timeSampleLine ?? "",
     partitionOverrides: normalizedNotebook.partitionOverrides ?? {},
-    partitionFilters: normalizedNotebook.partitionFilters ?? {},
+    partitionFilters: normalizePrefixFilters(normalizedNotebook.partitionFilters),
   } satisfies Notebook;
+}
+
+function clonePrefixFilters(prefixFilters: PrefixFilters) {
+  return Object.fromEntries(
+    Object.entries(prefixFilters).map(([key, filter]) => [
+      key,
+      filter.mode === "values"
+        ? { mode: "values", values: [...filter.values] }
+        : { mode: "range", start: filter.start, end: filter.end },
+    ]),
+  ) as PrefixFilters;
 }
 
 export default function HomePage() {
   const bucketPickerRef = useRef<HTMLDivElement | null>(null);
   const prefixPickerRef = useRef<HTMLDivElement | null>(null);
+  const partitionPickerRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const eventSourcesRef = useRef<Record<string, EventSource>>({});
   const [notebooks, setNotebooks] = useState(initialNotebooks);
   const [activeNotebookId, setActiveNotebookId] = useState(initialNotebooks[0].id);
@@ -279,9 +305,22 @@ export default function HomePage() {
   const [timePreviewByNotebook, setTimePreviewByNotebook] = useState<
     Record<string, TimePreviewState>
   >({});
+  const [partitionPickerState, setPartitionPickerState] = useState<
+    Record<string, PartitionValuePickerState>
+  >({});
 
   const activeNotebook =
     notebooks.find((notebook) => notebook.id === activeNotebookId) ?? notebooks[0];
+  const partitionPickerQueryKey = JSON.stringify(
+    Object.entries(partitionPickerState)
+      .filter(([, state]) => state.open)
+      .map(([key, state]) => ({
+        key,
+        search: state.search,
+        page: state.page,
+      }))
+      .sort((left, right) => left.key.localeCompare(right.key)),
+  );
 
   useEffect(() => {
     try {
@@ -333,6 +372,22 @@ export default function HomePage() {
       ) {
         setPrefixPickerOpen(false);
       }
+
+      setPartitionPickerState((current) => {
+        let changed = false;
+        const nextState: Record<string, PartitionValuePickerState> = {};
+
+        for (const [key, state] of Object.entries(current)) {
+          const ref = partitionPickerRefs.current[key];
+          const shouldClose = Boolean(
+            state.open && ref && !ref.contains(target),
+          );
+          nextState[key] = shouldClose ? { ...state, open: false } : state;
+          changed = changed || shouldClose;
+        }
+
+        return changed ? nextState : current;
+      });
     }
 
     document.addEventListener("pointerdown", handlePointerDown);
@@ -410,6 +465,33 @@ export default function HomePage() {
       return {
         ...current,
         [notebookId]: nextValue,
+      };
+    });
+  }
+
+  function setPartitionPickerEntry(
+    key: string,
+    updater:
+      | PartitionValuePickerState
+      | ((current: PartitionValuePickerState) => PartitionValuePickerState),
+  ) {
+    setPartitionPickerState((current) => {
+      const existing = current[key] ?? {
+        open: false,
+        search: "",
+        page: 1,
+        totalPages: 1,
+        totalItems: 0,
+        values: [],
+        loading: false,
+        error: null,
+      };
+      const nextValue =
+        typeof updater === "function" ? updater(existing) : updater;
+
+      return {
+        ...current,
+        [key]: nextValue,
       };
     });
   }
@@ -614,7 +696,7 @@ export default function HomePage() {
       timeConfig: activeNotebook.timeConfig,
       timeSampleLine: activeNotebook.timeSampleLine,
       partitionOverrides: activeNotebook.partitionOverrides ?? {},
-      partitionFilters: activeNotebook.partitionFilters ?? {},
+      partitionFilters: clonePrefixFilters(activeNotebook.partitionFilters ?? {}),
       query: "",
       startTime: activeNotebook.startTime,
       endTime: activeNotebook.endTime,
@@ -642,6 +724,7 @@ export default function HomePage() {
       ...activeNotebook,
       id: crypto.randomUUID(),
       title: `${activeNotebook.title} copy`,
+      partitionFilters: clonePrefixFilters(activeNotebook.partitionFilters ?? {}),
       updatedAt: "Just now",
     };
 
@@ -952,14 +1035,10 @@ export default function HomePage() {
             }
 
             const nextFilters = Object.fromEntries(
-              Object.entries(notebook.partitionFilters ?? {}).filter(([key, value]) => {
-                const definition = nextDefinitions.find(
-                  (partition) => partition.key === key,
-                );
-
-                return Boolean(definition && definition.values.includes(value));
-              }),
-            );
+              Object.entries(notebook.partitionFilters ?? {}).filter(([key]) =>
+                nextKeys.has(key),
+              ),
+            ) as PrefixFilters;
 
             for (const key of Object.keys(nextFilters)) {
               if (!nextKeys.has(key)) {
@@ -1014,6 +1093,100 @@ export default function HomePage() {
     setNextPrefixCursor(null);
   }, [activeNotebook.awsProfile, activeNotebook.bucket, activeNotebook.rootPrefix]);
 
+  useEffect(() => {
+    const openEntries = Object.entries(partitionPickerState).filter(
+      ([, state]) => state.open,
+    );
+    const openKeys = openEntries.map(([key]) => key);
+
+    if (
+      openKeys.length === 0 ||
+      !activeNotebook.awsProfile ||
+      !activeNotebook.bucket
+    ) {
+      return;
+    }
+
+    const controllers = openKeys.map((key) => {
+      const controller = new AbortController();
+      const state = partitionPickerState[key];
+
+      void (async () => {
+        setPartitionPickerEntry(key, (current) => ({
+          ...current,
+          loading: true,
+          error: null,
+        }));
+
+        try {
+          const response = await fetch(
+            `/api/aws/partition-values?profile=${encodeURIComponent(
+              activeNotebook.awsProfile,
+            )}&bucket=${encodeURIComponent(
+              activeNotebook.bucket,
+            )}&rootPrefix=${encodeURIComponent(
+              activeNotebook.rootPrefix,
+            )}&pathPattern=${encodeURIComponent(
+              activeNotebook.customPathPattern,
+            )}&key=${encodeURIComponent(key)}&search=${encodeURIComponent(
+              state.search,
+            )}&page=${state.page}&pageSize=25`,
+            {
+              cache: "no-store",
+              signal: controller.signal,
+            },
+          );
+          const payload = (await response.json()) as {
+            values?: string[];
+            page?: number;
+            totalPages?: number;
+            total?: number;
+            error?: string;
+          };
+
+          if (!response.ok) {
+            throw new Error(payload.error ?? "Failed to load partition values");
+          }
+
+          setPartitionPickerEntry(key, (current) => ({
+            ...current,
+            values: payload.values ?? [],
+            page: payload.page ?? current.page,
+            totalPages: payload.totalPages ?? 1,
+            totalItems: payload.total ?? 0,
+            loading: false,
+            error: null,
+          }));
+        } catch (error) {
+          if ((error as Error).name === "AbortError") {
+            return;
+          }
+
+          setPartitionPickerEntry(key, (current) => ({
+            ...current,
+            loading: false,
+            error:
+              error instanceof Error
+                ? error.message
+                : "Failed to load partition values",
+          }));
+        }
+      })();
+
+      return controller;
+    });
+
+    return () => {
+      controllers.forEach((controller) => controller.abort());
+    };
+  }, [
+    partitionPickerQueryKey,
+    activeNotebook.awsProfile,
+    activeNotebook.bucket,
+    activeNotebook.rootPrefix,
+    activeNotebook.customPathPattern,
+  ]);
+
   const profileChoices =
     availableProfiles.length > 0 ? availableProfiles : profileOptions;
   const bucketChoices = availableBuckets.includes(activeNotebook.bucket)
@@ -1041,7 +1214,7 @@ export default function HomePage() {
         label: override?.label || partition.key,
         kind: override?.kind || partition.kind,
         hidden: override?.hidden ?? false,
-        selectedValue: activeNotebook.partitionFilters?.[partition.key] ?? "",
+        selectedFilter: activeNotebook.partitionFilters?.[partition.key] ?? null,
       };
     });
   const timeMappedPartitionKeys = new Set(
@@ -1062,6 +1235,20 @@ export default function HomePage() {
       lineTimestamp: null,
       errors: [],
     };
+  function getPartitionPicker(key: string): PartitionValuePickerState {
+    return (
+      partitionPickerState[key] ?? {
+        open: false,
+        search: "",
+        page: 1,
+        totalPages: 1,
+        totalItems: 0,
+        values: [],
+        loading: false,
+        error: null,
+      }
+    );
+  }
   const canRunSearch =
     activeNotebook.query.trim().length > 0 &&
     activeNotebook.awsProfile.trim().length > 0 &&
@@ -1074,19 +1261,111 @@ export default function HomePage() {
       currentSearchState.status === "running" ||
       currentSearchState.status === "cancelling");
 
-  function updatePartitionFilter(key: string, value: string) {
+  function clearPartitionFilter(key: string) {
     setNotebooks((currentNotebooks) =>
       currentNotebooks.map((notebook) => {
         if (notebook.id !== activeNotebookId) {
           return notebook;
         }
 
-        const nextFilters = { ...notebook.partitionFilters };
+        const nextFilters = clonePrefixFilters(notebook.partitionFilters ?? {});
+        delete nextFilters[key];
+
+        return {
+          ...notebook,
+          partitionFilters: nextFilters,
+          updatedAt: "Just now",
+        };
+      }),
+    );
+  }
+
+  function selectSinglePartitionFilterValue(key: string, value: string) {
+    setNotebooks((currentNotebooks) =>
+      currentNotebooks.map((notebook) => {
+        if (notebook.id !== activeNotebookId) {
+          return notebook;
+        }
+
+        const nextFilters = clonePrefixFilters(notebook.partitionFilters ?? {});
 
         if (!value) {
           delete nextFilters[key];
         } else {
-          nextFilters[key] = value;
+          nextFilters[key] = {
+            mode: "values",
+            values: [value],
+          };
+        }
+
+        return {
+          ...notebook,
+          partitionFilters: nextFilters,
+          updatedAt: "Just now",
+        };
+      }),
+    );
+  }
+
+  function toggleCategoryPartitionFilterValue(key: string, value: string) {
+    setNotebooks((currentNotebooks) =>
+      currentNotebooks.map((notebook) => {
+        if (notebook.id !== activeNotebookId) {
+          return notebook;
+        }
+
+        const nextFilters = clonePrefixFilters(notebook.partitionFilters ?? {});
+        const currentValues =
+          nextFilters[key]?.mode === "values" ? nextFilters[key].values : [];
+        const hasValue = currentValues.includes(value);
+        const nextValues = hasValue
+          ? currentValues.filter((entry: string) => entry !== value)
+          : [...currentValues, value];
+
+        if (nextValues.length === 0) {
+          delete nextFilters[key];
+        } else {
+          nextFilters[key] = {
+            mode: "values",
+            values: nextValues,
+          };
+        }
+
+        return {
+          ...notebook,
+          partitionFilters: nextFilters,
+          updatedAt: "Just now",
+        };
+      }),
+    );
+  }
+
+  function setRangePartitionFilterBounds(
+    key: string,
+    patch: Partial<{ start: string; end: string }>,
+  ) {
+    setNotebooks((currentNotebooks) =>
+      currentNotebooks.map((notebook) => {
+        if (notebook.id !== activeNotebookId) {
+          return notebook;
+        }
+
+        const nextFilters = clonePrefixFilters(notebook.partitionFilters ?? {});
+        const currentFilter = nextFilters[key];
+        const nextFilter: PrefixFilterSelection = {
+          mode: "range",
+          start:
+            patch.start ??
+            (currentFilter?.mode === "range" ? currentFilter.start : ""),
+          end:
+            patch.end ??
+            (currentFilter?.mode === "range" ? currentFilter.end : ""),
+        };
+
+        if (!nextFilter.start && !nextFilter.end) {
+          delete nextFilters[key];
+        } else {
+          nextFilters[key] = nextFilter;
         }
 
         return {
@@ -1115,20 +1394,65 @@ export default function HomePage() {
             "category",
           hidden: false,
         };
+        const nextOverride = {
+          ...currentOverride,
+          ...patch,
+        };
+        const nextFilters = clonePrefixFilters(notebook.partitionFilters ?? {});
+        const currentFilter = nextFilters[key];
+
+        if (nextOverride.kind === "range" && currentFilter?.mode === "values") {
+          nextFilters[key] = {
+            mode: "values",
+            values: currentFilter.values.slice(0, 1),
+          };
+        }
+
+        if (nextOverride.kind === "category" && currentFilter?.mode === "range") {
+          delete nextFilters[key];
+        }
 
         return {
           ...notebook,
           partitionOverrides: {
             ...notebook.partitionOverrides,
             [key]: {
-              ...currentOverride,
-              ...patch,
+              ...nextOverride,
             },
           },
+          partitionFilters: nextFilters,
           updatedAt: "Just now",
         };
       }),
     );
+  }
+
+  function togglePartitionPicker(key: string) {
+    setPartitionPickerState((current) => {
+      const nextState: Record<string, PartitionValuePickerState> = {};
+
+      for (const [entryKey, state] of Object.entries(current)) {
+        nextState[entryKey] = {
+          ...state,
+          open: entryKey === key ? !state.open : false,
+        };
+      }
+
+      if (!nextState[key]) {
+        nextState[key] = {
+          open: true,
+          search: "",
+          page: 1,
+          totalPages: 1,
+          totalItems: 0,
+          values: [],
+          loading: false,
+          error: null,
+        };
+      }
+
+      return nextState;
+    });
   }
 
   function updateTimeMapping(partitionKey: string, patch: { component?: TimeComponent; format?: string }) {
@@ -1151,7 +1475,7 @@ export default function HomePage() {
           nextMapping.component === "none" && !nextMapping.format
             ? filtered
             : [...filtered, nextMapping];
-        const nextFilters = { ...(notebook.partitionFilters ?? {}) };
+        const nextFilters = clonePrefixFilters(notebook.partitionFilters ?? {});
 
         if (nextMapping.component !== "none") {
           delete nextFilters[partitionKey];
@@ -1195,10 +1519,14 @@ export default function HomePage() {
           const partition = allEditablePartitions.find(
             (entry) => entry.key === mapping.partitionKey,
           );
-          const value =
-            activeNotebook.partitionFilters[mapping.partitionKey] ??
-            partition?.values[0] ??
-            "";
+          const filter = activeNotebook.partitionFilters[mapping.partitionKey];
+          let value = partition?.values[0] ?? "";
+
+          if (filter?.mode === "values") {
+            value = filter.values[0] ?? "";
+          } else if (filter?.mode === "range") {
+            value = filter.start;
+          }
 
           return [mapping.partitionKey, value];
         }),
@@ -1251,6 +1579,40 @@ export default function HomePage() {
     ]),
   );
   const lineParser = activeNotebook.timeConfig.lineParser;
+
+  function getPartitionSelectionLabel(partition: (typeof editablePartitions)[number]) {
+    if (!partition.selectedFilter) {
+      return "All";
+    }
+
+    if (partition.selectedFilter.mode === "range") {
+      const { start, end } = partition.selectedFilter;
+
+      if (start && end) {
+        return `${start} -> ${end}`;
+      }
+
+      if (start) {
+        return `>= ${start}`;
+      }
+
+      if (end) {
+        return `<= ${end}`;
+      }
+
+      return "Range";
+    }
+
+    if (partition.selectedFilter.values.length === 0) {
+      return "All";
+    }
+
+    if (partition.selectedFilter.values.length === 1) {
+      return partition.selectedFilter.values[0] ?? "All";
+    }
+
+    return `${partition.selectedFilter.values.length} selected`;
+  }
 
   return (
     <main className="workspace">
@@ -1611,34 +1973,282 @@ export default function HomePage() {
                         </span>
                       </div>
                       <div className="partition-chip-controls">
-                        <select
-                          id={`partition-${partition.key}`}
-                          className="control"
-                          value={partition.selectedValue}
-                          disabled={partition.hidden}
-                          onChange={(event) =>
-                            updatePartitionFilter(partition.key, event.target.value)
-                          }
+                        <div
+                          className="picker partition-value-picker"
+                          ref={(node) => {
+                            partitionPickerRefs.current[partition.key] = node;
+                          }}
                         >
-                          <option value="">All</option>
-                          {partition.values.map((value) => (
-                            <option key={value} value={value}>
-                              {value}
-                            </option>
-                          ))}
-                        </select>
-                        <select
-                          className="control partition-kind-select"
-                          value={partition.kind}
-                          onChange={(event) =>
-                            updatePartitionOverride(partition.key, {
-                              kind: event.target.value as "category" | "range",
-                            })
-                          }
-                        >
-                          <option value="category">Category</option>
-                          <option value="range">Range</option>
-                        </select>
+                          <button
+                            id={`partition-${partition.key}`}
+                            className="picker-trigger"
+                            type="button"
+                            disabled={partition.hidden}
+                            onClick={() => togglePartitionPicker(partition.key)}
+                          >
+                            <span>{getPartitionSelectionLabel(partition)}</span>
+                            <span className="picker-chevron">▾</span>
+                          </button>
+                          {getPartitionPicker(partition.key).open ? (
+                            <div className="picker-menu">
+                              <div className="partition-picker-meta">
+                                <span className="field-state">Filter type</span>
+                                <div className="partition-type-toggle">
+                                  <button
+                                    type="button"
+                                    className={`partition-type-button${
+                                      partition.kind === "category" ? " is-active" : ""
+                                    }`}
+                                    onClick={() =>
+                                      updatePartitionOverride(partition.key, {
+                                        kind: "category",
+                                      })
+                                    }
+                                  >
+                                    Category
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className={`partition-type-button${
+                                      partition.kind === "range" ? " is-active" : ""
+                                    }`}
+                                    onClick={() =>
+                                      updatePartitionOverride(partition.key, {
+                                        kind: "range",
+                                      })
+                                    }
+                                    >
+                                      Range
+                                    </button>
+                                  </div>
+                                  {partition.kind === "range" ? (
+                                    <>
+                                      <span className="field-state">Filter mode</span>
+                                      <div className="partition-type-toggle">
+                                        <button
+                                          type="button"
+                                          className={`partition-type-button${
+                                            partition.selectedFilter?.mode !== "range"
+                                              ? " is-active"
+                                              : ""
+                                          }`}
+                                          onClick={() => clearPartitionFilter(partition.key)}
+                                        >
+                                          Values
+                                        </button>
+                                        <button
+                                          type="button"
+                                          className={`partition-type-button${
+                                            partition.selectedFilter?.mode === "range"
+                                              ? " is-active"
+                                              : ""
+                                          }`}
+                                          onClick={() =>
+                                            setRangePartitionFilterBounds(partition.key, {
+                                              start:
+                                                partition.selectedFilter?.mode === "range"
+                                                  ? partition.selectedFilter.start
+                                                  : "",
+                                              end:
+                                                partition.selectedFilter?.mode === "range"
+                                                  ? partition.selectedFilter.end
+                                                  : "",
+                                            })
+                                          }
+                                        >
+                                          Range
+                                        </button>
+                                      </div>
+                                    </>
+                                  ) : null}
+                              </div>
+                              {partition.kind === "range" &&
+                              partition.selectedFilter?.mode === "range" ? (
+                                <div className="partition-range-editor">
+                                  <div className="field">
+                                    <label htmlFor={`partition-${partition.key}-start`}>
+                                      Start
+                                    </label>
+                                    <input
+                                      id={`partition-${partition.key}-start`}
+                                      value={partition.selectedFilter.start}
+                                      placeholder="Optional"
+                                      onChange={(event) =>
+                                        setRangePartitionFilterBounds(partition.key, {
+                                          start: event.target.value,
+                                        })
+                                      }
+                                    />
+                                  </div>
+                                  <div className="field">
+                                    <label htmlFor={`partition-${partition.key}-end`}>
+                                      End
+                                    </label>
+                                    <input
+                                      id={`partition-${partition.key}-end`}
+                                      value={partition.selectedFilter.end}
+                                      placeholder="Optional"
+                                      onChange={(event) =>
+                                        setRangePartitionFilterBounds(partition.key, {
+                                          end: event.target.value,
+                                        })
+                                      }
+                                    />
+                                  </div>
+                                </div>
+                              ) : (
+                                <>
+                                  <div className="picker-toolbar">
+                                    <input
+                                      value={getPartitionPicker(partition.key).search}
+                                      placeholder={`Search ${partition.label}`}
+                                      onChange={(event) =>
+                                        setPartitionPickerEntry(partition.key, (current) => ({
+                                          ...current,
+                                          search: event.target.value,
+                                          page: 1,
+                                        }))
+                                      }
+                                    />
+                                  </div>
+                                  <div className="picker-list">
+                                    <button
+                                      type="button"
+                                      className={`picker-option${
+                                        partition.selectedFilter?.mode !== "values" ||
+                                        partition.selectedFilter.values.length === 0
+                                          ? " is-selected"
+                                          : ""
+                                      }`}
+                                      onClick={() => {
+                                        clearPartitionFilter(partition.key);
+                                      }}
+                                    >
+                                      All
+                                    </button>
+                                    {getPartitionPicker(partition.key).values.map((value) => (
+                                      <button
+                                        key={value}
+                                        type="button"
+                                        className={`picker-option picker-option-selectable${
+                                          partition.selectedFilter?.mode === "values" &&
+                                          partition.selectedFilter.values.includes(value)
+                                            ? " is-selected"
+                                            : ""
+                                        }`}
+                                        onClick={() => {
+                                          if (partition.kind === "category" || partition.kind === "range") {
+                                            toggleCategoryPartitionFilterValue(
+                                              partition.key,
+                                              value,
+                                            );
+
+                                            if (partition.kind === "range") {
+                                              return;
+                                            }
+
+                                            return;
+                                          }
+
+                                          selectSinglePartitionFilterValue(
+                                            partition.key,
+                                            value,
+                                          );
+                                          setPartitionPickerEntry(partition.key, (current) => ({
+                                            ...current,
+                                            open: false,
+                                          }));
+                                        }}
+                                      >
+                                        <span>{value}</span>
+                                        <span className="picker-option-mark">
+                                          {partition.selectedFilter?.mode === "values" &&
+                                          partition.selectedFilter.values.includes(value)
+                                            ? "Selected"
+                                            : ""}
+                                        </span>
+                                      </button>
+                                    ))}
+                                    {getPartitionPicker(partition.key).values.length === 0 &&
+                                    !getPartitionPicker(partition.key).loading ? (
+                                      <div className="picker-empty">No values found</div>
+                                    ) : null}
+                                  </div>
+                                </>
+                              )}
+                              <div className="picker-footer">
+                                <span className="field-state">
+                                  {partition.kind === "range" &&
+                                  partition.selectedFilter?.mode === "range"
+                                    ? "Bounds are inclusive"
+                                    : getPartitionPicker(partition.key).loading
+                                    ? "Loading values..."
+                                    : `${getPartitionPicker(partition.key).totalItems} values · page ${getPartitionPicker(partition.key).page} of ${getPartitionPicker(partition.key).totalPages}`}
+                                </span>
+                                <div className="pager-row">
+                                  {partition.kind === "category" ||
+                                  (partition.kind === "range" &&
+                                    partition.selectedFilter?.mode !== "range") ? (
+                                    <button
+                                      className="secondary-button"
+                                      type="button"
+                                      onClick={() =>
+                                        setPartitionPickerEntry(partition.key, (current) => ({
+                                          ...current,
+                                          open: false,
+                                        }))
+                                      }
+                                    >
+                                      Done
+                                    </button>
+                                  ) : null}
+                                  <button
+                                    className="secondary-button"
+                                    type="button"
+                                    disabled={
+                                      (partition.kind === "range" &&
+                                        partition.selectedFilter?.mode === "range") ||
+                                      getPartitionPicker(partition.key).page <= 1 ||
+                                      getPartitionPicker(partition.key).loading
+                                    }
+                                    onClick={() =>
+                                      setPartitionPickerEntry(partition.key, (current) => ({
+                                        ...current,
+                                        page: Math.max(1, current.page - 1),
+                                      }))
+                                    }
+                                  >
+                                    Prev
+                                  </button>
+                                  <button
+                                    className="secondary-button"
+                                    type="button"
+                                    disabled={
+                                      (partition.kind === "range" &&
+                                        partition.selectedFilter?.mode === "range") ||
+                                      getPartitionPicker(partition.key).page >=
+                                        getPartitionPicker(partition.key).totalPages ||
+                                      getPartitionPicker(partition.key).loading
+                                    }
+                                    onClick={() =>
+                                      setPartitionPickerEntry(partition.key, (current) => ({
+                                        ...current,
+                                        page: Math.min(current.totalPages, current.page + 1),
+                                      }))
+                                    }
+                                  >
+                                    Next
+                                  </button>
+                                </div>
+                              </div>
+                              {getPartitionPicker(partition.key).error ? (
+                                <p className="field-error picker-error">
+                                  {getPartitionPicker(partition.key).error}
+                                </p>
+                              ) : null}
+                            </div>
+                          ) : null}
+                        </div>
                         <label className="partition-toggle">
                           <input
                             type="checkbox"

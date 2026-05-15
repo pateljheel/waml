@@ -94,6 +94,72 @@ export const searchMatchSchema = z.object({
 
 export type SearchMatch = z.infer<typeof searchMatchSchema>;
 
+export const prefixFilterValuesSelectionSchema = z.object({
+  mode: z.literal("values"),
+  values: z.array(z.string()).default([]),
+});
+
+export const prefixFilterRangeSelectionSchema = z.object({
+  mode: z.literal("range"),
+  start: z.string().default(""),
+  end: z.string().default(""),
+});
+
+export const prefixFilterSelectionSchema = z.discriminatedUnion("mode", [
+  prefixFilterValuesSelectionSchema,
+  prefixFilterRangeSelectionSchema,
+]);
+
+export type PrefixFilterSelection = z.infer<typeof prefixFilterSelectionSchema>;
+
+function normalizePrefixFilterSelection(
+  value: string | string[] | PrefixFilterSelection,
+): PrefixFilterSelection | null {
+  if (typeof value === "string" || Array.isArray(value)) {
+    const values = (Array.isArray(value) ? value : [value]).filter(
+      (entry) => entry.trim().length > 0,
+    );
+
+    return values.length > 0 ? { mode: "values", values } : null;
+  }
+
+  if (value.mode === "values") {
+    const values = value.values.filter((entry) => entry.trim().length > 0);
+    return values.length > 0 ? { mode: "values", values } : null;
+  }
+
+  const start = value.start.trim();
+  const end = value.end.trim();
+
+  return start || end ? { mode: "range", start, end } : null;
+}
+
+export const prefixFiltersSchema = z
+  .record(
+    z.string(),
+    z.union([
+      prefixFilterSelectionSchema,
+      z.string(),
+      z.array(z.string()),
+    ]),
+  )
+  .transform((filters) => {
+    const normalizedEntries: Array<[string, PrefixFilterSelection]> = [];
+
+    for (const [key, value] of Object.entries(filters)) {
+      const normalizedValue = normalizePrefixFilterSelection(value);
+
+      if (normalizedValue) {
+        normalizedEntries.push([key, normalizedValue]);
+      }
+    }
+
+    return Object.fromEntries(normalizedEntries);
+  })
+  .default({});
+
+export type PrefixFilters = z.infer<typeof prefixFiltersSchema>;
+
 export const searchJobSchema = z.object({
   id: z.string().min(1),
   notebookId: z.string().min(1),
@@ -108,7 +174,7 @@ export const searchJobSchema = z.object({
     pathMappings: [],
     lineParser: { mode: "none" },
   }),
-  prefixFilters: z.record(z.string(), z.string()).default({}),
+  prefixFilters: prefixFiltersSchema,
   customPathPattern: z.string().default(""),
   status: searchJobStatusSchema.default("queued"),
   progress: searchProgressSchema.default({}),
@@ -121,6 +187,16 @@ export const searchJobSchema = z.object({
 });
 
 export type SearchJob = z.infer<typeof searchJobSchema>;
+
+export function normalizePrefixFilters(input: unknown): PrefixFilters {
+  const parsed = prefixFiltersSchema.safeParse(input);
+
+  if (parsed.success) {
+    return parsed.data;
+  }
+
+  return {};
+}
 
 export const createSearchJobInputSchema = searchJobSchema.omit({
   id: true,
