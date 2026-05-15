@@ -39,7 +39,11 @@ import {
   createObjectCacheKey,
   getCacheBudgetBytes,
   getObjectCachePaths,
+  packedTrigramArtifactContainsAll,
+  readCompressedTextArtifact,
   shouldUseTrigramPrefilter,
+  writeCompressedTextArtifact,
+  writePackedTrigramArtifact,
 } from "./cache";
 import {
   isGzipObject,
@@ -92,63 +96,54 @@ async function scanCachedTextFile({
   queryEndEpochMs: number | null;
 }) {
   const matcher = createSubstringMatcher(job);
-  const decoder = new TextDecoder("utf-8");
-  const stream = fsSync.createReadStream(filepath);
-  let bufferedText = "";
+  const text = await readCompressedTextArtifact(filepath);
   let lineNumber = 0;
+  progress.bytesScanned += Buffer.byteLength(text);
+  const lines = text.split(/\r?\n/);
 
-  for await (const rawChunk of stream) {
+  for (const lineText of lines) {
     if (isJobCancellationRequested(job.id)) {
-      stream.destroy();
       throw new Error("JOB_CANCELLED");
     }
 
-    const chunkBuffer = Buffer.isBuffer(rawChunk)
-      ? rawChunk
-      : Buffer.from(rawChunk);
-    progress.bytesScanned += chunkBuffer.byteLength;
-    bufferedText += decoder.decode(chunkBuffer, { stream: true });
+    lineNumber += 1;
 
-    const lines = bufferedText.split(/\r?\n/);
-    bufferedText = lines.pop() ?? "";
-
-    for (const lineText of lines) {
-      lineNumber += 1;
-
-      if (!matcher.matches(lineText)) {
-        continue;
-      }
-
-      const timestampResult = extractLineTimestamp(
-        job.timeConfig.lineParser,
-        lineText,
-        job.timeConfig.timezone,
-      );
-      const parsedLineTimestamp = timestampResult.lineTimestamp
-        ? parseQueryTimestamp(timestampResult.lineTimestamp)
-        : null;
-
-      if (
-        (queryStartEpochMs !== null || queryEndEpochMs !== null) &&
-        job.timeConfig.lineParser.mode !== "none" &&
-        (parsedLineTimestamp === null ||
-          !isTimestampInRange(
-            parsedLineTimestamp,
-            queryStartEpochMs,
-            queryEndEpochMs,
-          ))
-      ) {
-        continue;
-      }
-
-      pendingMatches.push({
-        objectKey,
-        lineNumber,
-        lineText,
-        timestampText: timestampResult.lineTimestamp ?? undefined,
-      });
-      progress.matchesFound += 1;
+    if (!matcher.matches(lineText)) {
+      continue;
     }
+
+    const timestampResult = extractLineTimestamp(
+      job.timeConfig.lineParser,
+      lineText,
+      job.timeConfig.timezone,
+    );
+    const parsedLineTimestamp = timestampResult.lineTimestamp
+      ? parseQueryTimestamp(
+          timestampResult.lineTimestamp,
+          job.timeConfig.timezone,
+        )
+      : null;
+
+    if (
+      (queryStartEpochMs !== null || queryEndEpochMs !== null) &&
+      job.timeConfig.lineParser.mode !== "none" &&
+      (parsedLineTimestamp === null ||
+        !isTimestampInRange(
+          parsedLineTimestamp,
+          queryStartEpochMs,
+          queryEndEpochMs,
+        ))
+    ) {
+      continue;
+    }
+
+    pendingMatches.push({
+      objectKey,
+      lineNumber,
+      lineText,
+      timestampText: timestampResult.lineTimestamp ?? undefined,
+    });
+    progress.matchesFound += 1;
 
     const now = Date.now();
 
@@ -165,35 +160,6 @@ async function scanCachedTextFile({
       lastProgressAt.value = now;
     }
   }
-
-  bufferedText += decoder.decode();
-
-  if (bufferedText && matcher.matches(bufferedText)) {
-    lineNumber += 1;
-    const timestampResult = extractLineTimestamp(
-      job.timeConfig.lineParser,
-      bufferedText,
-      job.timeConfig.timezone,
-    );
-    const parsedLineTimestamp = timestampResult.lineTimestamp
-      ? parseQueryTimestamp(timestampResult.lineTimestamp)
-      : null;
-
-    if (
-      (queryStartEpochMs === null && queryEndEpochMs === null) ||
-      job.timeConfig.lineParser.mode === "none" ||
-      (parsedLineTimestamp !== null &&
-        isTimestampInRange(parsedLineTimestamp, queryStartEpochMs, queryEndEpochMs))
-    ) {
-      pendingMatches.push({
-        objectKey,
-        lineNumber,
-        lineText: bufferedText,
-        timestampText: timestampResult.lineTimestamp ?? undefined,
-      });
-      progress.matchesFound += 1;
-    }
-  }
 }
 
 async function writeCachedChunkArtifact({
@@ -205,6 +171,8 @@ async function writeCachedChunkArtifact({
   chunkText,
   byteStart,
   byteEnd,
+  minTimestampMs,
+  maxTimestampMs,
 }: {
   job: SearchJob;
   objectKey: string;
@@ -214,21 +182,19 @@ async function writeCachedChunkArtifact({
   chunkText: string;
   byteStart: number;
   byteEnd: number;
+  minTimestampMs: number | null;
+  maxTimestampMs: number | null;
 }) {
   const chunkPk = createObjectCacheKey(job.source.bucket, objectKey, etag, chunkId);
   const cachePaths = getObjectCachePaths(chunkPk);
   const tempTextPath = `${cachePaths.textPath}.${process.pid}.tmp`;
   const tempTrigramPath = `${cachePaths.trigramPath}.${process.pid}.tmp`;
-  const trigramSet = new Set<string>();
+  const trigramSet = new Set<number>();
   addTrigrams(trigramSet, chunkText);
 
   await fs.mkdir(cachePaths.directory, { recursive: true });
-  await fs.writeFile(tempTextPath, chunkText, "utf8");
-  await fs.writeFile(
-    tempTrigramPath,
-    JSON.stringify([...trigramSet.values()].sort()),
-    "utf8",
-  );
+  await writeCompressedTextArtifact(tempTextPath, chunkText);
+  await writePackedTrigramArtifact(tempTrigramPath, trigramSet);
   await fs.rename(tempTextPath, cachePaths.textPath);
   await fs.rename(tempTrigramPath, cachePaths.trigramPath);
 
@@ -254,6 +220,8 @@ async function writeCachedChunkArtifact({
     cacheSizeBytes,
     trigramCount: trigramSet.size,
     lineCount,
+    minTimestampMs,
+    maxTimestampMs,
   });
   appendJobEvent(job.id, "cache.write", {
     objectKey,
@@ -381,6 +349,9 @@ async function processObject({
 }) {
   const matcher = createSubstringMatcher(job);
   const gzipObject = isGzipObject(objectKey);
+  const patternTrigrams = shouldUseTrigramPrefilter(job)
+    ? buildPatternTrigrams(job.pattern)
+    : null;
   const cachedChunks = listCacheChunksForObject(job.source.bucket, objectKey, etag);
   const partitionValues =
     extractCustomValues(relativePath, job.customPathPattern) ??
@@ -416,19 +387,36 @@ async function processObject({
     for (const cachedChunk of validCachedChunks) {
       const chunkPk = cachedChunk.chunkPk;
       let trigramRejected = false;
+      const chunkTimePruned =
+        (queryStartEpochMs !== null || queryEndEpochMs !== null) &&
+        cachedChunk.minTimestampMs !== null &&
+        cachedChunk.maxTimestampMs !== null &&
+        !doesRangeOverlap(
+          {
+            startEpochMs: cachedChunk.minTimestampMs,
+            endEpochMs: cachedChunk.maxTimestampMs,
+          },
+          queryStartEpochMs,
+          queryEndEpochMs,
+        );
 
-      if (shouldUseTrigramPrefilter(job)) {
+      if (!chunkTimePruned && patternTrigrams !== null) {
         try {
-          const patternTrigrams = [...buildPatternTrigrams(job.pattern)];
-          const cachedTrigrams = new Set<string>(
-            JSON.parse(await fs.readFile(cachedChunk.artifactPath, "utf8")) as string[],
-          );
-          trigramRejected = patternTrigrams.some(
-            (trigram) => !cachedTrigrams.has(trigram),
-          );
+          trigramRejected = !(await packedTrigramArtifactContainsAll(
+            cachedChunk.artifactPath,
+            patternTrigrams,
+          ));
         } catch {
           trigramRejected = false;
         }
+      }
+
+      if (chunkTimePruned) {
+        appendJobEvent(job.id, "object.skipped", {
+          objectKey,
+          reason: "cache_time_prune",
+          chunkId: cachedChunk.chunkId,
+        });
       }
 
       touchCacheChunk(chunkPk);
@@ -437,14 +425,17 @@ async function processObject({
         chunkPk,
         chunkId: cachedChunk.chunkId,
         trigramRejected,
+        timePruned: chunkTimePruned,
       });
 
-      if (trigramRejected) {
-        appendJobEvent(job.id, "object.skipped", {
-          objectKey,
-          reason: "cache_trigram_prune",
-          chunkId: cachedChunk.chunkId,
-        });
+      if (chunkTimePruned || trigramRejected) {
+        if (trigramRejected) {
+          appendJobEvent(job.id, "object.skipped", {
+            objectKey,
+            reason: "cache_trigram_prune",
+            chunkId: cachedChunk.chunkId,
+          });
+        }
         continue;
       }
 
@@ -549,9 +540,15 @@ async function processObject({
   let chunkTextBytes = 0;
   let chunkLineCount = 0;
   let chunkByteStart = 0;
+  let chunkMinTimestampMs: number | null = null;
+  let chunkMaxTimestampMs: number | null = null;
 
   async function flushChunk(force = false) {
-    if (!force && chunkLineCount < cacheChunkLineLimit && chunkTextBytes < cacheChunkTextBytesLimit) {
+    if (
+      !force &&
+      chunkLineCount < cacheChunkLineLimit &&
+      chunkTextBytes < cacheChunkTextBytesLimit
+    ) {
       return;
     }
 
@@ -576,12 +573,16 @@ async function processObject({
       chunkText,
       byteStart: chunkByteStart,
       byteEnd: chunkByteStart + chunkTextBytes,
+      minTimestampMs: chunkMinTimestampMs,
+      maxTimestampMs: chunkMaxTimestampMs,
     });
     chunkIndex += 1;
     chunkByteStart += chunkTextBytes;
     chunkTextParts = [];
     chunkTextBytes = 0;
     chunkLineCount = 0;
+    chunkMinTimestampMs = null;
+    chunkMaxTimestampMs = null;
   }
   try {
     for await (const rawChunk of decodedBody) {
@@ -621,19 +622,33 @@ async function processObject({
         chunkTextBytes += Buffer.byteLength(lineWithNewline);
         chunkLineCount += 1;
 
-        if (!matcher.matches(lineText)) {
-          await flushChunk();
-          continue;
-        }
-
         const timestampResult = extractLineTimestamp(
           job.timeConfig.lineParser,
           lineText,
           job.timeConfig.timezone,
         );
         const parsedLineTimestamp = timestampResult.lineTimestamp
-          ? parseQueryTimestamp(timestampResult.lineTimestamp)
+          ? parseQueryTimestamp(
+              timestampResult.lineTimestamp,
+              job.timeConfig.timezone,
+            )
           : null;
+
+        if (parsedLineTimestamp !== null) {
+          chunkMinTimestampMs =
+            chunkMinTimestampMs === null
+              ? parsedLineTimestamp
+              : Math.min(chunkMinTimestampMs, parsedLineTimestamp);
+          chunkMaxTimestampMs =
+            chunkMaxTimestampMs === null
+              ? parsedLineTimestamp
+              : Math.max(chunkMaxTimestampMs, parsedLineTimestamp);
+        }
+
+        if (!matcher.matches(lineText)) {
+          await flushChunk();
+          continue;
+        }
 
         if (
           (queryStartEpochMs !== null || queryEndEpochMs !== null) &&
@@ -647,6 +662,7 @@ async function processObject({
               queryEndEpochMs,
             )
           ) {
+            await flushChunk();
             continue;
           }
         }
@@ -685,16 +701,30 @@ async function processObject({
       chunkTextBytes += Buffer.byteLength(bufferedText);
       chunkLineCount += 1;
 
-      if (matcher.matches(bufferedText)) {
-        const timestampResult = extractLineTimestamp(
-          job.timeConfig.lineParser,
-          bufferedText,
-          job.timeConfig.timezone,
-        );
-        const parsedLineTimestamp = timestampResult.lineTimestamp
-          ? parseQueryTimestamp(timestampResult.lineTimestamp)
-          : null;
+      const timestampResult = extractLineTimestamp(
+        job.timeConfig.lineParser,
+        bufferedText,
+        job.timeConfig.timezone,
+      );
+      const parsedLineTimestamp = timestampResult.lineTimestamp
+        ? parseQueryTimestamp(
+            timestampResult.lineTimestamp,
+            job.timeConfig.timezone,
+          )
+        : null;
 
+      if (parsedLineTimestamp !== null) {
+        chunkMinTimestampMs =
+          chunkMinTimestampMs === null
+            ? parsedLineTimestamp
+            : Math.min(chunkMinTimestampMs, parsedLineTimestamp);
+        chunkMaxTimestampMs =
+          chunkMaxTimestampMs === null
+            ? parsedLineTimestamp
+            : Math.max(chunkMaxTimestampMs, parsedLineTimestamp);
+      }
+
+      if (matcher.matches(bufferedText)) {
         if (
           (queryStartEpochMs === null && queryEndEpochMs === null) ||
           job.timeConfig.lineParser.mode === "none" ||

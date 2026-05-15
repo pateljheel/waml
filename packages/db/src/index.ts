@@ -84,6 +84,8 @@ type ChunkRow = {
   cache_size_bytes: number;
   trigram_count: number;
   line_count: number;
+  min_timestamp_ms: number | null;
+  max_timestamp_ms: number | null;
   created_at: string;
   last_accessed_at: string;
 };
@@ -101,6 +103,8 @@ export type CacheChunkRecord = {
   cacheSizeBytes: number;
   trigramCount: number;
   lineCount: number;
+  minTimestampMs: number | null;
+  maxTimestampMs: number | null;
   createdAt: string;
   lastAccessedAt: string;
 };
@@ -228,6 +232,8 @@ export function initializeDatabase() {
       cache_size_bytes INTEGER NOT NULL DEFAULT 0,
       trigram_count INTEGER NOT NULL DEFAULT 0,
       line_count INTEGER NOT NULL DEFAULT 0,
+      min_timestamp_ms INTEGER,
+      max_timestamp_ms INTEGER,
       created_at TEXT NOT NULL,
       last_accessed_at TEXT NOT NULL
     );
@@ -289,6 +295,8 @@ export function initializeDatabase() {
     "cache_size_bytes",
     "cache_size_bytes INTEGER NOT NULL DEFAULT 0",
   );
+  ensureColumn(db, "chunks", "min_timestamp_ms", "min_timestamp_ms INTEGER");
+  ensureColumn(db, "chunks", "max_timestamp_ms", "max_timestamp_ms INTEGER");
 
   return db;
 }
@@ -307,6 +315,8 @@ function mapChunkRow(row: ChunkRow): CacheChunkRecord {
     cacheSizeBytes: row.cache_size_bytes ?? 0,
     trigramCount: row.trigram_count ?? 0,
     lineCount: row.line_count ?? 0,
+    minTimestampMs: row.min_timestamp_ms,
+    maxTimestampMs: row.max_timestamp_ms,
     createdAt: row.created_at,
     lastAccessedAt: row.last_accessed_at,
   };
@@ -738,10 +748,11 @@ export function upsertCacheChunk(input: UpsertCacheChunkInput) {
     `INSERT INTO chunks (
       chunk_pk, bucket, object_key, etag, chunk_id, byte_start, byte_end,
       artifact_path, text_cache_path, cache_size_bytes, trigram_count, line_count,
-      created_at, last_accessed_at
+      min_timestamp_ms, max_timestamp_ms, created_at, last_accessed_at
     ) VALUES (
       @chunkPk, @bucket, @objectKey, @etag, @chunkId, @byteStart, @byteEnd,
       @artifactPath, @textCachePath, @cacheSizeBytes, @trigramCount, @lineCount,
+      @minTimestampMs, @maxTimestampMs,
       @createdAt, @lastAccessedAt
     )
     ON CONFLICT(chunk_pk) DO UPDATE SET
@@ -756,6 +767,8 @@ export function upsertCacheChunk(input: UpsertCacheChunkInput) {
       cache_size_bytes = excluded.cache_size_bytes,
       trigram_count = excluded.trigram_count,
       line_count = excluded.line_count,
+      min_timestamp_ms = excluded.min_timestamp_ms,
+      max_timestamp_ms = excluded.max_timestamp_ms,
       last_accessed_at = excluded.last_accessed_at`,
   ).run({
     chunkPk: input.chunkPk,
@@ -770,6 +783,8 @@ export function upsertCacheChunk(input: UpsertCacheChunkInput) {
     cacheSizeBytes: input.cacheSizeBytes,
     trigramCount: input.trigramCount,
     lineCount: input.lineCount,
+    minTimestampMs: input.minTimestampMs,
+    maxTimestampMs: input.maxTimestampMs,
     createdAt,
     lastAccessedAt,
   });
