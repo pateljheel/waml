@@ -50,6 +50,7 @@ type JobRow = {
   mode: SearchJob["mode"];
   pattern: string;
   search_options_json: string;
+  time_config_json: string;
   start_time: string;
   end_time: string;
   source_json: string;
@@ -109,6 +110,7 @@ export function initializeDatabase() {
       mode TEXT NOT NULL,
       pattern TEXT NOT NULL,
       search_options_json TEXT NOT NULL DEFAULT '{}',
+      time_config_json TEXT NOT NULL DEFAULT '{}',
       start_time TEXT NOT NULL DEFAULT '',
       end_time TEXT NOT NULL DEFAULT '',
       source_json TEXT NOT NULL DEFAULT '{}',
@@ -196,6 +198,12 @@ export function initializeDatabase() {
   ensureColumn(
     db,
     "jobs",
+    "time_config_json",
+    "time_config_json TEXT NOT NULL DEFAULT '{}'",
+  );
+  ensureColumn(
+    db,
+    "jobs",
     "prefix_filters_json",
     "prefix_filters_json TEXT NOT NULL DEFAULT '{}'",
   );
@@ -258,6 +266,7 @@ function mapJobRow(row: JobRow): SearchJob {
     mode: row.mode,
     pattern: row.pattern,
     searchOptions: JSON.parse(row.search_options_json || "{}") as SearchJob["searchOptions"],
+    timeConfig: JSON.parse(row.time_config_json || "{}") as SearchJob["timeConfig"],
     startTime: row.start_time,
     endTime: row.end_time,
     source: JSON.parse(row.source_json) as SearchJob["source"],
@@ -290,6 +299,11 @@ export function createJob(input: CreateSearchJobInput): SearchJob {
     searchOptions: input.searchOptions ?? {
       caseSensitive: false,
     },
+    timeConfig: input.timeConfig ?? {
+      timezone: "UTC",
+      pathMappings: [],
+      lineParser: { mode: "none" },
+    },
     startTime: input.startTime ?? "",
     endTime: input.endTime ?? "",
     source: input.source,
@@ -312,12 +326,12 @@ export function createJob(input: CreateSearchJobInput): SearchJob {
 
   db.prepare(
     `INSERT INTO jobs (
-      id, notebook_id, mode, pattern, search_options_json, start_time, end_time, source_json,
+      id, notebook_id, mode, pattern, search_options_json, time_config_json, start_time, end_time, source_json,
       prefix_filters_json, custom_path_pattern, status, bytes_scanned,
       objects_scanned, chunks_scanned, matches_found, error_message,
       cancel_requested_at, started_at, finished_at, created_at, updated_at
     ) VALUES (
-      @id, @notebookId, @mode, @pattern, @searchOptionsJson, @startTime, @endTime, @sourceJson,
+      @id, @notebookId, @mode, @pattern, @searchOptionsJson, @timeConfigJson, @startTime, @endTime, @sourceJson,
       @prefixFiltersJson, @customPathPattern, @status, @bytesScanned,
       @objectsScanned, @chunksScanned, @matchesFound, @errorMessage,
       @cancelRequestedAt, @startedAt, @finishedAt, @createdAt, @updatedAt
@@ -328,6 +342,7 @@ export function createJob(input: CreateSearchJobInput): SearchJob {
     mode: job.mode,
     pattern: job.pattern,
     searchOptionsJson: JSON.stringify(job.searchOptions),
+    timeConfigJson: JSON.stringify(job.timeConfig),
     startTime: job.startTime,
     endTime: job.endTime,
     sourceJson: JSON.stringify(job.source),

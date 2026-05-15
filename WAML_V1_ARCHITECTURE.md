@@ -307,6 +307,285 @@ Notebook overrides should support:
 
 This is safer than editing inference directly because the underlying path scan may change over time without losing notebook-specific intent.
 
+## Universal Time Range Design
+
+Time filtering should be built around one canonical query interval:
+
+- `start_ts`
+- `end_ts`
+
+These should be treated as the authoritative search bounds. Everything inferred from paths or parsed from lines should be normalized into this same model.
+
+The system should use time in two layers:
+
+- coarse path-derived time for pruning candidate objects
+- exact line-derived time for final result inclusion
+
+### Canonical Time Semantics
+
+Use a universal interval model:
+
+- `start_ts`: inclusive
+- `end_ts`: exclusive
+
+Internally, these should be normalized to UTC and stored as epoch milliseconds or canonical UTC ISO timestamps.
+
+### Notebook Time Configuration
+
+Each notebook should have a `time config` that contains:
+
+- path time mapping
+- line timestamp parser
+- timezone context
+
+Suggested conceptual schema:
+
+```ts
+type TimeComponent =
+  | "none"
+  | "year"
+  | "month"
+  | "day"
+  | "hour"
+  | "minute"
+  | "second"
+  | "date"
+  | "datetime";
+
+type PartitionTimeMapping = {
+  partitionKey: string;
+  component: TimeComponent;
+  format?: string;
+};
+
+type LineTimestampParser =
+  | { mode: "none" }
+  | { mode: "auto" }
+  | {
+      mode: "regex";
+      pattern: string;
+      group: number;
+      format?: string;
+    };
+
+type NotebookTimeConfig = {
+  timezone: string;
+  pathMappings: PartitionTimeMapping[];
+  lineParser: LineTimestampParser;
+};
+```
+
+### Path Time Mapping
+
+The system should not hardcode partition keys such as `year`, `month`, `day`, or `hour`.
+
+Instead, inferred or custom partition keys should be optionally mapped to timestamp roles.
+
+Examples:
+
+- `year -> year`
+- `month -> month`
+- `day -> day`
+- `hour -> hour`
+- `year_month -> date`, format `YYYYMM`
+- `dt -> date`, format `YYYY-MM-DD`
+- `ts_hour -> datetime`, format `YYYYMMDDHH`
+
+This allows arbitrary partition layouts to participate in coarse time pruning.
+
+### Coarse Object Time Derivation
+
+Once path mappings are configured, the worker should derive a coarse object interval from path metadata.
+
+Examples:
+
+- `year=2026, month=05, day=14, hour=13`
+  - object coarse range:
+    - `[2026-05-14T13:00:00Z, 2026-05-14T14:00:00Z)`
+- `year_month=202605, day=14, hour=13`
+  - same effective interval after parsing `year_month`
+- `year=2026, month=05`
+  - coarse range:
+    - `[2026-05-01T00:00:00Z, 2026-06-01T00:00:00Z)`
+
+This interval should be used only for candidate pruning, not as the final truth for line inclusion.
+
+### Line Timestamp Parsing
+
+Line timestamps should be parsed independently from object path metadata.
+
+Recommended parser modes:
+
+- `none`
+- `auto`
+- `regex`
+
+Behavior:
+
+- `none`
+  - no line-level timestamp parsing
+  - only coarse object time is available
+- `auto`
+  - try common timestamp shapes such as ISO-like values
+- `regex`
+  - extract timestamp text with a capture group
+  - optionally parse it with an explicit format
+
+Examples:
+
+- line:
+  - `2026-05-14T13:42:11Z level=info ...`
+  - parser mode: `auto`
+- line:
+  - `[2026-05-14 13:42:11] request failed`
+  - parser mode: `regex`
+  - pattern:
+    - `^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]`
+  - group:
+    - `1`
+  - format:
+    - `YYYY-MM-DD HH:mm:ss`
+
+The parsed line timestamp should be the authoritative value for final time-range filtering whenever available.
+
+### Time Filtering Semantics
+
+Execution should use both time layers:
+
+1. build coarse object intervals from path mappings
+2. prune objects by overlap with the requested interval
+3. stream candidate objects
+4. parse line timestamps where configured
+5. include a line only if its parsed timestamp overlaps the canonical query interval
+
+Overlap rule for objects:
+
+- include object only if:
+  - `object_end > start_ts`
+  - `object_start < end_ts`
+
+Final inclusion rule for lines:
+
+- include line only if:
+  - `line_ts >= start_ts`
+  - `line_ts < end_ts`
+
+### Missing Or Invalid Line Timestamps
+
+When a time filter is active and a line timestamp parser is configured:
+
+- if line timestamp parsing fails, the line should be excluded by default
+
+When line parser mode is `none`:
+
+- rely on coarse object time only
+
+This keeps time filtering predictable and avoids leaking unrelated lines into a bounded search window.
+
+### Time Mapping UI
+
+The notebook UI should expose a `time mapping` section alongside dynamic filters.
+
+Recommended columns:
+
+- `partition key`
+- `time role`
+- `format`
+
+Example rows:
+
+- `year_month | date | YYYYMM`
+- `day | day |`
+- `hour | hour |`
+- `service | none |`
+
+This lets users decide which inferred/custom partitions participate in time pruning.
+
+### Line Parser UI
+
+The notebook UI should also expose a `line timestamp parser` section.
+
+Recommended fields:
+
+- parser mode
+- regex pattern
+- capture group
+- format
+- sample line
+- parsed result preview
+
+The preview is important because users need to validate timestamp extraction before running expensive scans.
+
+### Preview API
+
+Add a preview endpoint for validating time configuration:
+
+- `POST /api/time/preview`
+
+Example request:
+
+```json
+{
+  "pathMappings": [
+    { "partitionKey": "year_month", "component": "date", "format": "YYYYMM" },
+    { "partitionKey": "day", "component": "day" },
+    { "partitionKey": "hour", "component": "hour" }
+  ],
+  "partitionValues": {
+    "year_month": "202605",
+    "day": "14",
+    "hour": "13"
+  },
+  "lineParser": {
+    "mode": "regex",
+    "pattern": "^\\[(\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2})\\]",
+    "group": 1,
+    "format": "YYYY-MM-DD HH:mm:ss"
+  },
+  "sampleLine": "[2026-05-14 13:42:11] timeout while awaiting headers"
+}
+```
+
+Example response:
+
+```json
+{
+  "coarseRange": {
+    "start": "2026-05-14T13:00:00Z",
+    "end": "2026-05-14T14:00:00Z"
+  },
+  "lineTimestamp": "2026-05-14T13:42:11Z",
+  "errors": []
+}
+```
+
+### Recommended Initial Format Support
+
+Keep format support narrow in v1.
+
+Recommended initial path or line formats:
+
+- `YYYY`
+- `YYYYMM`
+- `YYYY-MM-DD`
+- `YYYYMMDD`
+- `YYYYMMDDHH`
+- `YYYY-MM-DD HH:mm:ss`
+- `YYYY-MM-DDTHH:mm:ssZ`
+- `unix_seconds`
+- `unix_millis`
+
+This covers most real log layouts without committing to a very broad formatting DSL too early.
+
+### Future Optimization
+
+As chunks are scanned and cached, the system should record:
+
+- `chunk_min_ts`
+- `chunk_max_ts`
+
+This will allow future searches to skip cached chunks whose exact line time bounds do not overlap the requested interval.
+
 ## Core Design
 
 The system should work at chunk granularity, not whole-object granularity.

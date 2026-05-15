@@ -29,6 +29,53 @@ export const notebookSourceSchema = z.object({
 
 export type NotebookSource = z.infer<typeof notebookSourceSchema>;
 
+export const timeComponentSchema = z.enum([
+  "none",
+  "year",
+  "month",
+  "day",
+  "hour",
+  "minute",
+  "second",
+  "date",
+  "datetime",
+]);
+
+export type TimeComponent = z.infer<typeof timeComponentSchema>;
+
+export const partitionTimeMappingSchema = z.object({
+  partitionKey: z.string().min(1),
+  component: timeComponentSchema.default("none"),
+  format: z.string().optional(),
+});
+
+export type PartitionTimeMapping = z.infer<typeof partitionTimeMappingSchema>;
+
+export const lineTimestampParserSchema = z.discriminatedUnion("mode", [
+  z.object({
+    mode: z.literal("none"),
+  }),
+  z.object({
+    mode: z.literal("auto"),
+  }),
+  z.object({
+    mode: z.literal("regex"),
+    pattern: z.string().min(1),
+    group: z.number().int().positive(),
+    format: z.string().optional(),
+  }),
+]);
+
+export type LineTimestampParser = z.infer<typeof lineTimestampParserSchema>;
+
+export const notebookTimeConfigSchema = z.object({
+  timezone: z.string().default("UTC"),
+  pathMappings: z.array(partitionTimeMappingSchema).default([]),
+  lineParser: lineTimestampParserSchema.default({ mode: "none" }),
+});
+
+export type NotebookTimeConfig = z.infer<typeof notebookTimeConfigSchema>;
+
 export const searchProgressSchema = z.object({
   bytesScanned: z.number().int().nonnegative().default(0),
   objectsScanned: z.number().int().nonnegative().default(0),
@@ -56,6 +103,11 @@ export const searchJobSchema = z.object({
   startTime: z.string().default(""),
   endTime: z.string().default(""),
   source: notebookSourceSchema,
+  timeConfig: notebookTimeConfigSchema.default({
+    timezone: "UTC",
+    pathMappings: [],
+    lineParser: { mode: "none" },
+  }),
   prefixFilters: z.record(z.string(), z.string()).default({}),
   customPathPattern: z.string().default(""),
   status: searchJobStatusSchema.default("queued"),
@@ -83,6 +135,16 @@ export const createSearchJobInputSchema = searchJobSchema.omit({
 });
 
 export type CreateSearchJobInput = z.infer<typeof createSearchJobInputSchema>;
+
+export const timePreviewInputSchema = z.object({
+  timezone: z.string().default("UTC"),
+  pathMappings: z.array(partitionTimeMappingSchema).default([]),
+  partitionValues: z.record(z.string(), z.string()).default({}),
+  lineParser: lineTimestampParserSchema.default({ mode: "none" }),
+  sampleLine: z.string().default(""),
+});
+
+export type TimePreviewInput = z.infer<typeof timePreviewInputSchema>;
 
 export const searchJobEventTypeSchema = z.enum([
   "job.queued",

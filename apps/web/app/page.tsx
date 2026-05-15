@@ -1,6 +1,13 @@
 "use client";
 
-import type { SearchJob, SearchJobStatus, SearchMatch } from "@waml/shared";
+import type {
+  LineTimestampParser,
+  NotebookTimeConfig,
+  SearchJob,
+  SearchJobStatus,
+  SearchMatch,
+  TimeComponent,
+} from "@waml/shared";
 import { useEffect, useRef, useState } from "react";
 
 type Notebook = {
@@ -14,6 +21,8 @@ type Notebook = {
   searchOptions: {
     caseSensitive: boolean;
   };
+  timeConfig: NotebookTimeConfig;
+  timeSampleLine: string;
   partitionOverrides: Record<
     string,
     {
@@ -51,6 +60,17 @@ type NotebookSearchState = {
   connected: boolean;
 };
 
+type TimePreviewState = {
+  loading: boolean;
+  coarseRange: {
+    start: string;
+    end: string;
+  } | null;
+  extractedText: string | null;
+  lineTimestamp: string | null;
+  errors: string[];
+};
+
 const initialNotebooks: Notebook[] = [
   {
     id: "checkout-errors",
@@ -63,6 +83,8 @@ const initialNotebooks: Notebook[] = [
     searchOptions: {
       caseSensitive: false,
     },
+    timeConfig: createDefaultTimeConfig(),
+    timeSampleLine: "",
     partitionOverrides: {},
     partitionFilters: {},
     query: 'timeout while awaiting headers service="checkout-api"',
@@ -80,6 +102,8 @@ const initialNotebooks: Notebook[] = [
     searchOptions: {
       caseSensitive: false,
     },
+    timeConfig: createDefaultTimeConfig(),
+    timeSampleLine: "",
     partitionOverrides: {},
     partitionFilters: {},
     query: 'token refresh failed service="auth-service"',
@@ -97,6 +121,8 @@ const initialNotebooks: Notebook[] = [
     searchOptions: {
       caseSensitive: false,
     },
+    timeConfig: createDefaultTimeConfig(),
+    timeSampleLine: "",
     partitionOverrides: {},
     partitionFilters: {},
     query: 'consumer lag service="worker-ingest"',
@@ -152,6 +178,16 @@ function createEmptySearchState(): NotebookSearchState {
   };
 }
 
+function createDefaultTimeConfig(): NotebookTimeConfig {
+  return {
+    timezone: "UTC",
+    pathMappings: [],
+    lineParser: {
+      mode: "none",
+    },
+  };
+}
+
 function getPrefixLabel(currentPrefix: string, candidatePrefix: string) {
   const current = currentPrefix.trim();
 
@@ -176,6 +212,8 @@ function normalizeNotebook(notebook: Partial<Notebook> & Pick<Notebook, "id" | "
     searchOptions: {
       caseSensitive: false,
     },
+    timeConfig: createDefaultTimeConfig(),
+    timeSampleLine: "",
     partitionOverrides: {},
     partitionFilters: {},
     query: "",
@@ -190,6 +228,8 @@ function normalizeNotebook(notebook: Partial<Notebook> & Pick<Notebook, "id" | "
     searchOptions: normalizedNotebook.searchOptions ?? {
       caseSensitive: false,
     },
+    timeConfig: normalizedNotebook.timeConfig ?? createDefaultTimeConfig(),
+    timeSampleLine: normalizedNotebook.timeSampleLine ?? "",
     partitionOverrides: normalizedNotebook.partitionOverrides ?? {},
     partitionFilters: normalizedNotebook.partitionFilters ?? {},
   } satisfies Notebook;
@@ -225,6 +265,9 @@ export default function HomePage() {
   const [bucketReloadToken, setBucketReloadToken] = useState(0);
   const [searchStateByNotebook, setSearchStateByNotebook] = useState<
     Record<string, NotebookSearchState>
+  >({});
+  const [timePreviewByNotebook, setTimePreviewByNotebook] = useState<
+    Record<string, TimePreviewState>
   >({});
 
   const activeNotebook =
@@ -329,6 +372,30 @@ export default function HomePage() {
         typeof updater === "function"
           ? updater(existing)
           : updater;
+
+      return {
+        ...current,
+        [notebookId]: nextValue,
+      };
+    });
+  }
+
+  function setTimePreviewState(
+    notebookId: string,
+    updater:
+      | TimePreviewState
+      | ((current: TimePreviewState) => TimePreviewState),
+  ) {
+    setTimePreviewByNotebook((current) => {
+      const existing = current[notebookId] ?? {
+        loading: false,
+        coarseRange: null,
+        extractedText: null,
+        lineTimestamp: null,
+        errors: [],
+      };
+      const nextValue =
+        typeof updater === "function" ? updater(existing) : updater;
 
       return {
         ...current,
@@ -463,6 +530,7 @@ export default function HomePage() {
           rootPrefix: activeNotebook.rootPrefix,
         },
         searchOptions: activeNotebook.searchOptions,
+        timeConfig: activeNotebook.timeConfig,
         prefixFilters: activeNotebook.partitionFilters,
         customPathPattern: activeNotebook.customPathPattern,
       }),
@@ -533,6 +601,8 @@ export default function HomePage() {
       rootPrefix: activeNotebook.rootPrefix,
       customPathPattern: activeNotebook.customPathPattern,
       searchOptions: activeNotebook.searchOptions,
+      timeConfig: activeNotebook.timeConfig,
+      timeSampleLine: activeNotebook.timeSampleLine,
       partitionOverrides: activeNotebook.partitionOverrides ?? {},
       partitionFilters: activeNotebook.partitionFilters ?? {},
       query: "",
@@ -964,6 +1034,14 @@ export default function HomePage() {
     });
   const currentSearchState =
     searchStateByNotebook[activeNotebook.id] ?? createEmptySearchState();
+  const currentTimePreview =
+    timePreviewByNotebook[activeNotebook.id] ?? {
+      loading: false,
+      coarseRange: null,
+      extractedText: null,
+      lineTimestamp: null,
+      errors: [],
+    };
   const canRunSearch =
     activeNotebook.query.trim().length > 0 &&
     activeNotebook.awsProfile.trim().length > 0 &&
@@ -1032,6 +1110,121 @@ export default function HomePage() {
       }),
     );
   }
+
+  function updateTimeMapping(partitionKey: string, patch: { component?: TimeComponent; format?: string }) {
+    setNotebooks((currentNotebooks) =>
+      currentNotebooks.map((notebook) => {
+        if (notebook.id !== activeNotebookId) {
+          return notebook;
+        }
+
+        const currentMappings = notebook.timeConfig.pathMappings ?? [];
+        const existing = currentMappings.find((mapping) => mapping.partitionKey === partitionKey);
+        const nextMapping = {
+          partitionKey,
+          component: patch.component ?? existing?.component ?? "none",
+          format: patch.format ?? existing?.format,
+        };
+
+        const filtered = currentMappings.filter((mapping) => mapping.partitionKey !== partitionKey);
+        const nextMappings =
+          nextMapping.component === "none" && !nextMapping.format
+            ? filtered
+            : [...filtered, nextMapping];
+
+        return {
+          ...notebook,
+          timeConfig: {
+            ...notebook.timeConfig,
+            pathMappings: nextMappings,
+          },
+          updatedAt: "Just now",
+        };
+      }),
+    );
+  }
+
+  function updateLineParser(nextParser: LineTimestampParser) {
+    setNotebooks((currentNotebooks) =>
+      currentNotebooks.map((notebook) =>
+        notebook.id === activeNotebookId
+          ? {
+              ...notebook,
+              timeConfig: {
+                ...notebook.timeConfig,
+                lineParser: nextParser,
+              },
+              updatedAt: "Just now",
+            }
+          : notebook,
+      ),
+    );
+  }
+
+  async function previewTimeConfig() {
+    const partitionValues = Object.fromEntries(
+      activeNotebook.timeConfig.pathMappings
+        .filter((mapping) => mapping.component !== "none")
+        .map((mapping) => {
+          const partition = editablePartitions.find(
+            (entry) => entry.key === mapping.partitionKey,
+          );
+          const value =
+            activeNotebook.partitionFilters[mapping.partitionKey] ??
+            partition?.values[0] ??
+            "";
+
+          return [mapping.partitionKey, value];
+        }),
+    );
+
+    setTimePreviewState(activeNotebook.id, (current) => ({
+      ...current,
+      loading: true,
+      errors: [],
+    }));
+
+    const response = await fetch("/api/time/preview", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        timezone: activeNotebook.timeConfig.timezone,
+        pathMappings: activeNotebook.timeConfig.pathMappings,
+        partitionValues,
+        lineParser: activeNotebook.timeConfig.lineParser,
+        sampleLine: activeNotebook.timeSampleLine,
+      }),
+    });
+
+    const payload = (await response.json()) as {
+      coarseRange?: {
+        start: string;
+        end: string;
+      } | null;
+      extractedText?: string | null;
+      lineTimestamp?: string | null;
+      errors?: string[];
+      error?: string;
+    };
+
+    setTimePreviewState(activeNotebook.id, {
+      loading: false,
+      coarseRange: payload.coarseRange ?? null,
+      extractedText: payload.extractedText ?? null,
+      lineTimestamp: payload.lineTimestamp ?? null,
+      errors: payload.errors ?? (payload.error ? [payload.error] : []),
+    });
+  }
+
+  const pathMappingsByKey = Object.fromEntries(
+    activeNotebook.timeConfig.pathMappings.map((mapping) => [
+      mapping.partitionKey,
+      mapping,
+    ]),
+  );
+  const lineParser = activeNotebook.timeConfig.lineParser;
 
   return (
     <main className="workspace">
@@ -1439,6 +1632,188 @@ export default function HomePage() {
               ) : null}
             </div>
           ) : null}
+          <div className="time-config-section">
+            <div className="partition-header">
+              <div>
+                <label>Time config</label>
+                <p className="field-state">
+                  Map partition keys to time components and preview line timestamp parsing.
+                </p>
+              </div>
+              <button
+                className="secondary-button"
+                type="button"
+                onClick={previewTimeConfig}
+                disabled={currentTimePreview.loading}
+              >
+                {currentTimePreview.loading ? "Previewing..." : "Preview time config"}
+              </button>
+            </div>
+            {editablePartitions.length > 0 ? (
+              <div className="time-mapping-list">
+                {editablePartitions.map((partition) => {
+                  const mapping = pathMappingsByKey[partition.key];
+
+                  return (
+                    <div key={partition.key} className="time-mapping-row">
+                      <span className="time-mapping-key">{partition.label}</span>
+                      <select
+                        className="control"
+                        value={mapping?.component ?? "none"}
+                        onChange={(event) =>
+                          updateTimeMapping(partition.key, {
+                            component: event.target.value as TimeComponent,
+                          })
+                        }
+                      >
+                        <option value="none">None</option>
+                        <option value="year">Year</option>
+                        <option value="month">Month</option>
+                        <option value="day">Day</option>
+                        <option value="hour">Hour</option>
+                        <option value="minute">Minute</option>
+                        <option value="second">Second</option>
+                        <option value="date">Date</option>
+                        <option value="datetime">Datetime</option>
+                      </select>
+                      <input
+                        value={mapping?.format ?? ""}
+                        placeholder="Format, e.g. YYYYMM"
+                        onChange={(event) =>
+                          updateTimeMapping(partition.key, {
+                            format: event.target.value || undefined,
+                          })
+                        }
+                      />
+                    </div>
+                  );
+                })}
+              </div>
+            ) : null}
+            <div className="time-parser-grid">
+              <div className="field">
+                <label htmlFor="time-timezone">Timezone</label>
+                <input
+                  id="time-timezone"
+                  value={activeNotebook.timeConfig.timezone}
+                  onChange={(event) =>
+                    updateActiveNotebook("timeConfig", {
+                      ...activeNotebook.timeConfig,
+                      timezone: event.target.value,
+                    })
+                  }
+                />
+              </div>
+              <div className="field">
+                <label htmlFor="line-parser-mode">Line parser</label>
+                <select
+                  id="line-parser-mode"
+                  className="control"
+                  value={lineParser.mode}
+                  onChange={(event) => {
+                    const mode = event.target.value as LineTimestampParser["mode"];
+                    if (mode === "none" || mode === "auto") {
+                      updateLineParser({ mode });
+                      return;
+                    }
+                    updateLineParser({
+                      mode: "regex",
+                      pattern: "",
+                      group: 1,
+                    });
+                  }}
+                >
+                  <option value="none">None</option>
+                  <option value="auto">Auto</option>
+                  <option value="regex">Regex</option>
+                </select>
+              </div>
+              {lineParser.mode === "regex" ? (
+                <>
+                  <div className="field">
+                    <label htmlFor="line-parser-pattern">Regex pattern</label>
+                    <input
+                      id="line-parser-pattern"
+                      value={lineParser.pattern}
+                      onChange={(event) =>
+                        updateLineParser({
+                          ...lineParser,
+                          pattern: event.target.value,
+                        })
+                      }
+                    />
+                  </div>
+                  <div className="field">
+                    <label htmlFor="line-parser-group">Capture group</label>
+                    <input
+                      id="line-parser-group"
+                      type="number"
+                      min={1}
+                      value={lineParser.group}
+                      onChange={(event) =>
+                        updateLineParser({
+                          ...lineParser,
+                          group: Math.max(1, Number(event.target.value) || 1),
+                        })
+                      }
+                    />
+                  </div>
+                  <div className="field parser-format-field">
+                    <label htmlFor="line-parser-format">Timestamp format</label>
+                    <input
+                      id="line-parser-format"
+                      value={lineParser.format ?? ""}
+                      placeholder="Optional. Example: YYYY-MM-DD HH:mm:ss"
+                      onChange={(event) =>
+                        updateLineParser({
+                          ...lineParser,
+                          format: event.target.value || undefined,
+                        })
+                      }
+                    />
+                  </div>
+                </>
+              ) : null}
+              <div className="field parser-sample-field">
+                <label htmlFor="time-sample-line">Sample line</label>
+                <input
+                  id="time-sample-line"
+                  value={activeNotebook.timeSampleLine}
+                  placeholder="Paste a sample log line"
+                  onChange={(event) =>
+                    updateActiveNotebook("timeSampleLine", event.target.value)
+                  }
+                />
+              </div>
+            </div>
+            <div className="time-preview-panel">
+              <div className="time-preview-row">
+                <span className="field-state">Coarse range</span>
+                <strong>
+                  {currentTimePreview.coarseRange
+                    ? `${currentTimePreview.coarseRange.start} -> ${currentTimePreview.coarseRange.end}`
+                    : "No coarse range"}
+                </strong>
+              </div>
+              <div className="time-preview-row">
+                <span className="field-state">Extracted text</span>
+                <strong>{currentTimePreview.extractedText ?? "None"}</strong>
+              </div>
+              <div className="time-preview-row">
+                <span className="field-state">Parsed line timestamp</span>
+                <strong>{currentTimePreview.lineTimestamp ?? "None"}</strong>
+              </div>
+              {currentTimePreview.errors.length > 0 ? (
+                <div className="time-preview-errors">
+                  {currentTimePreview.errors.map((error) => (
+                    <p key={error} className="field-error">
+                      {error}
+                    </p>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          </div>
           <div className="search-section">
             <div className="search-section-header">
               <div>

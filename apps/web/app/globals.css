@@ -288,6 +288,13 @@ select:focus {
   padding-top: 4px;
 }
 
+.time-config-section {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 12px;
+  padding-top: 6px;
+}
+
 .partition-header {
   display: flex;
   align-items: flex-start;
@@ -394,6 +401,62 @@ select:focus {
 
 .source-hive {
   color: var(--muted);
+}
+
+.time-mapping-list {
+  display: grid;
+  gap: 8px;
+}
+
+.time-mapping-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 180px) 150px minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+}
+
+.time-mapping-key {
+  color: var(--text);
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+.time-parser-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 12px;
+}
+
+.parser-format-field,
+.parser-sample-field {
+  grid-column: 1 / -1;
+}
+
+.time-preview-panel {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.55);
+}
+
+.time-preview-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 0.82rem;
+}
+
+.time-preview-row strong {
+  text-align: right;
+  word-break: break-word;
+}
+
+.time-preview-errors {
+  display: grid;
+  gap: 4px;
 }
 
 .search-section {
@@ -706,6 +769,15 @@ select:focus {
 
   .partition-chip-controls {
     grid-template-columns: 1fr;
+  }
+
+  .time-mapping-row,
+  .time-parser-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .time-preview-row {
+    flex-direction: column;
   }
 
   .search-section-header {
