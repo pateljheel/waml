@@ -583,6 +583,77 @@ select:focus {
   font-size: 0.82rem;
 }
 
+.search-cache-activity {
+  display: grid;
+  gap: 6px;
+  max-height: 140px;
+  overflow-y: auto;
+  padding: 8px 0;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+
+.cache-event-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+
+.cache-event-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 58px;
+  padding: 0.18rem 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.03);
+  color: var(--muted-2);
+  text-transform: lowercase;
+}
+
+.cache-event-cache-hit {
+  color: var(--accent);
+  border-color: rgba(47, 111, 237, 0.18);
+  background: rgba(47, 111, 237, 0.08);
+}
+
+.cache-event-cache-miss {
+  color: var(--muted-2);
+}
+
+.cache-event-cache-write {
+  color: var(--running);
+  border-color: rgba(12, 140, 92, 0.16);
+  background: rgba(12, 140, 92, 0.08);
+}
+
+.cache-event-cache-evicted {
+  color: var(--danger);
+  border-color: rgba(200, 76, 76, 0.18);
+  background: rgba(200, 76, 76, 0.08);
+}
+
+.cache-event-key {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cache-event-body {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.cache-event-meta {
+  color: var(--muted-2);
+  font-size: 0.72rem;
+}
+
 .search-result-row {
   display: grid;
   gap: 6px;

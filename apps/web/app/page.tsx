@@ -61,6 +61,18 @@ type NotebookSearchState = {
     matchesFound: number;
   };
   results: SearchMatch[];
+  cache: {
+    hits: number;
+    misses: number;
+    writes: number;
+    evictions: number;
+    recentEvents: Array<{
+      type: "cache.hit" | "cache.miss" | "cache.write" | "cache.evicted";
+      objectKey: string;
+      chunkId?: string | null;
+      detail?: string | null;
+    }>;
+  };
   errorMessage: string | null;
   connected: boolean;
 };
@@ -195,6 +207,13 @@ function createEmptySearchState(): NotebookSearchState {
       matchesFound: 0,
     },
     results: [],
+    cache: {
+      hits: 0,
+      misses: 0,
+      writes: 0,
+      evictions: 0,
+      recentEvents: [],
+    },
     errorMessage: null,
     connected: false,
   };
@@ -553,6 +572,49 @@ export default function HomePage() {
           next.results = [...next.results, ...results].slice(-500);
         }
 
+        if (
+          message.type === "cache.hit" ||
+          message.type === "cache.miss" ||
+          message.type === "cache.write" ||
+          message.type === "cache.evicted"
+        ) {
+          const cacheEventType = message.type as
+            | "cache.hit"
+            | "cache.miss"
+            | "cache.write"
+            | "cache.evicted";
+          const objectKey =
+            (message.payload.objectKey as string | undefined) ?? "unknown";
+          const chunkId =
+            (message.payload.chunkId as string | undefined) ?? null;
+          const detail =
+            cacheEventType === "cache.hit" &&
+            message.payload.trigramRejected === true
+              ? "trigram-pruned"
+              : cacheEventType === "cache.miss"
+                ? "cold object"
+                : null;
+          const recentEvents = [
+            ...next.cache.recentEvents,
+            {
+              type: cacheEventType,
+              objectKey,
+              chunkId,
+              detail,
+            },
+          ].slice(-20);
+
+          next.cache = {
+            ...next.cache,
+            hits: next.cache.hits + (cacheEventType === "cache.hit" ? 1 : 0),
+            misses: next.cache.misses + (cacheEventType === "cache.miss" ? 1 : 0),
+            writes: next.cache.writes + (cacheEventType === "cache.write" ? 1 : 0),
+            evictions:
+              next.cache.evictions + (cacheEventType === "cache.evicted" ? 1 : 0),
+            recentEvents,
+          };
+        }
+
         if (message.type === "job.cancelling") {
           next.status = "cancelling";
           setNotebookStatus(notebookId, "running");
@@ -647,6 +709,13 @@ export default function HomePage() {
       status: payload.job.status,
       progress: payload.job.progress,
       results: [],
+      cache: {
+        hits: 0,
+        misses: 0,
+        writes: 0,
+        evictions: 0,
+        recentEvents: [],
+      },
       errorMessage: null,
       connected: false,
     });
@@ -2526,11 +2595,40 @@ export default function HomePage() {
               <span>{currentSearchState.progress.objectsScanned} objects</span>
               <span>{currentSearchState.progress.bytesScanned} bytes scanned</span>
               <span>
+                cache {currentSearchState.cache.hits} hit / {currentSearchState.cache.misses} miss
+              </span>
+              <span>
+                {currentSearchState.cache.writes} writes / {currentSearchState.cache.evictions} evictions
+              </span>
+              <span>
                 {currentSearchState.connected ? "Live stream connected" : "Stream idle"}
               </span>
             </div>
             {currentSearchState.errorMessage ? (
               <p className="field-error">{currentSearchState.errorMessage}</p>
+            ) : null}
+            {currentSearchState.cache.recentEvents.length > 0 ? (
+              <div className="search-cache-activity">
+                {currentSearchState.cache.recentEvents.map((event, index) => (
+                  <div
+                    key={`${event.type}:${event.objectKey}:${event.chunkId ?? "object"}:${index}`}
+                    className="cache-event-row"
+                  >
+                    <span
+                      className={`cache-event-badge cache-event-${event.type.replace(".", "-")}`}
+                    >
+                      {event.type.replace("cache.", "")}
+                    </span>
+                    <div className="cache-event-body">
+                      <span className="cache-event-key">{event.objectKey}</span>
+                      <span className="cache-event-meta">
+                        {event.chunkId ? `chunk ${event.chunkId}` : "object scope"}
+                        {event.detail ? ` · ${event.detail}` : ""}
+                      </span>
+                    </div>
+                  </div>
+                ))}
+              </div>
             ) : null}
             <div className="search-results">
               {currentSearchState.results.length === 0 ? (

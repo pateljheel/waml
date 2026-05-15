@@ -71,6 +71,48 @@ type JobRow = {
   updated_at: string;
 };
 
+type ChunkRow = {
+  chunk_pk: string;
+  bucket: string;
+  object_key: string;
+  etag: string;
+  chunk_id: string;
+  byte_start: number;
+  byte_end: number;
+  artifact_path: string;
+  text_cache_path: string | null;
+  cache_size_bytes: number;
+  trigram_count: number;
+  line_count: number;
+  created_at: string;
+  last_accessed_at: string;
+};
+
+export type CacheChunkRecord = {
+  chunkPk: string;
+  bucket: string;
+  objectKey: string;
+  etag: string;
+  chunkId: string;
+  byteStart: number;
+  byteEnd: number;
+  artifactPath: string;
+  textCachePath: string | null;
+  cacheSizeBytes: number;
+  trigramCount: number;
+  lineCount: number;
+  createdAt: string;
+  lastAccessedAt: string;
+};
+
+export type UpsertCacheChunkInput = Omit<
+  CacheChunkRecord,
+  "createdAt" | "lastAccessedAt"
+> & {
+  createdAt?: string;
+  lastAccessedAt?: string;
+};
+
 export function getDatabaseFilePath() {
   return databaseFile;
 }
@@ -175,6 +217,7 @@ export function initializeDatabase() {
 
     CREATE TABLE IF NOT EXISTS chunks (
       chunk_pk TEXT PRIMARY KEY,
+      bucket TEXT NOT NULL DEFAULT '',
       object_key TEXT NOT NULL,
       etag TEXT NOT NULL,
       chunk_id TEXT NOT NULL,
@@ -182,6 +225,7 @@ export function initializeDatabase() {
       byte_end INTEGER NOT NULL,
       artifact_path TEXT NOT NULL,
       text_cache_path TEXT,
+      cache_size_bytes INTEGER NOT NULL DEFAULT 0,
       trigram_count INTEGER NOT NULL DEFAULT 0,
       line_count INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL,
@@ -238,8 +282,34 @@ export function initializeDatabase() {
   ensureColumn(db, "jobs", "cancel_requested_at", "cancel_requested_at TEXT");
   ensureColumn(db, "jobs", "started_at", "started_at TEXT");
   ensureColumn(db, "jobs", "finished_at", "finished_at TEXT");
+  ensureColumn(db, "chunks", "bucket", "bucket TEXT NOT NULL DEFAULT ''");
+  ensureColumn(
+    db,
+    "chunks",
+    "cache_size_bytes",
+    "cache_size_bytes INTEGER NOT NULL DEFAULT 0",
+  );
 
   return db;
+}
+
+function mapChunkRow(row: ChunkRow): CacheChunkRecord {
+  return {
+    chunkPk: row.chunk_pk,
+    bucket: row.bucket,
+    objectKey: row.object_key,
+    etag: row.etag,
+    chunkId: row.chunk_id,
+    byteStart: row.byte_start,
+    byteEnd: row.byte_end,
+    artifactPath: row.artifact_path,
+    textCachePath: row.text_cache_path,
+    cacheSizeBytes: row.cache_size_bytes ?? 0,
+    trigramCount: row.trigram_count ?? 0,
+    lineCount: row.line_count ?? 0,
+    createdAt: row.created_at,
+    lastAccessedAt: row.last_accessed_at,
+  };
 }
 
 function normalizeStatus(status: string): SearchJobStatus {
@@ -630,4 +700,141 @@ export function cancelJob(jobId: string) {
   }
 
   return job;
+}
+
+export function getCacheChunk(chunkPk: string) {
+  const db = initializeDatabase();
+  const row = db
+    .prepare("SELECT * FROM chunks WHERE chunk_pk = ?")
+    .get(chunkPk) as ChunkRow | undefined;
+
+  return row ? mapChunkRow(row) : null;
+}
+
+export function listCacheChunksForObject(
+  bucket: string,
+  objectKey: string,
+  etag: string,
+) {
+  const db = initializeDatabase();
+  const rows = db
+    .prepare(
+      `SELECT * FROM chunks
+       WHERE bucket = ? AND object_key = ? AND etag = ?
+       ORDER BY CAST(chunk_id AS INTEGER) ASC, created_at ASC`,
+    )
+    .all(bucket, objectKey, etag) as ChunkRow[];
+
+  return rows.map(mapChunkRow);
+}
+
+export function upsertCacheChunk(input: UpsertCacheChunkInput) {
+  const db = initializeDatabase();
+  const now = new Date().toISOString();
+  const createdAt = input.createdAt ?? now;
+  const lastAccessedAt = input.lastAccessedAt ?? now;
+
+  db.prepare(
+    `INSERT INTO chunks (
+      chunk_pk, bucket, object_key, etag, chunk_id, byte_start, byte_end,
+      artifact_path, text_cache_path, cache_size_bytes, trigram_count, line_count,
+      created_at, last_accessed_at
+    ) VALUES (
+      @chunkPk, @bucket, @objectKey, @etag, @chunkId, @byteStart, @byteEnd,
+      @artifactPath, @textCachePath, @cacheSizeBytes, @trigramCount, @lineCount,
+      @createdAt, @lastAccessedAt
+    )
+    ON CONFLICT(chunk_pk) DO UPDATE SET
+      bucket = excluded.bucket,
+      object_key = excluded.object_key,
+      etag = excluded.etag,
+      chunk_id = excluded.chunk_id,
+      byte_start = excluded.byte_start,
+      byte_end = excluded.byte_end,
+      artifact_path = excluded.artifact_path,
+      text_cache_path = excluded.text_cache_path,
+      cache_size_bytes = excluded.cache_size_bytes,
+      trigram_count = excluded.trigram_count,
+      line_count = excluded.line_count,
+      last_accessed_at = excluded.last_accessed_at`,
+  ).run({
+    chunkPk: input.chunkPk,
+    bucket: input.bucket,
+    objectKey: input.objectKey,
+    etag: input.etag,
+    chunkId: input.chunkId,
+    byteStart: input.byteStart,
+    byteEnd: input.byteEnd,
+    artifactPath: input.artifactPath,
+    textCachePath: input.textCachePath,
+    cacheSizeBytes: input.cacheSizeBytes,
+    trigramCount: input.trigramCount,
+    lineCount: input.lineCount,
+    createdAt,
+    lastAccessedAt,
+  });
+
+  return getCacheChunk(input.chunkPk);
+}
+
+export function touchCacheChunk(chunkPk: string) {
+  const db = initializeDatabase();
+  const now = new Date().toISOString();
+  db.prepare("UPDATE chunks SET last_accessed_at = ? WHERE chunk_pk = ?").run(
+    now,
+    chunkPk,
+  );
+  return getCacheChunk(chunkPk);
+}
+
+export function getTotalCacheSizeBytes() {
+  const db = initializeDatabase();
+  const row = db
+    .prepare("SELECT COALESCE(SUM(cache_size_bytes), 0) AS total FROM chunks")
+    .get() as { total: number };
+
+  return row.total ?? 0;
+}
+
+export function listCacheEvictionCandidates(limit = 100) {
+  const db = initializeDatabase();
+  const rows = db
+    .prepare(
+      `SELECT * FROM chunks
+       ORDER BY last_accessed_at ASC, created_at ASC
+       LIMIT ?`,
+    )
+    .all(limit) as ChunkRow[];
+
+  return rows.map(mapChunkRow);
+}
+
+export function deleteCacheChunk(chunkPk: string) {
+  const existing = getCacheChunk(chunkPk);
+
+  if (!existing) {
+    return null;
+  }
+
+  const db = initializeDatabase();
+  db.prepare("DELETE FROM chunks WHERE chunk_pk = ?").run(chunkPk);
+  return existing;
+}
+
+export function deleteCacheChunksForObject(
+  bucket: string,
+  objectKey: string,
+  etag: string,
+) {
+  const existing = listCacheChunksForObject(bucket, objectKey, etag);
+
+  if (existing.length === 0) {
+    return [];
+  }
+
+  const db = initializeDatabase();
+  db.prepare(
+    "DELETE FROM chunks WHERE bucket = ? AND object_key = ? AND etag = ?",
+  ).run(bucket, objectKey, etag);
+  return existing;
 }

@@ -3,19 +3,26 @@ import {
   ListObjectsV2Command,
   S3Client,
 } from "@aws-sdk/client-s3";
-import { fromIni } from "@aws-sdk/credential-providers";
 import {
   appendJobEvent,
   cancelJob,
   claimNextQueuedJob,
   completeJob,
+  deleteCacheChunk,
+  deleteCacheChunksForObject,
   ensureRuntimeDirectories,
   failJob,
   getCacheDirectoryPath,
+  getCacheChunk,
   getDatabaseFilePath,
   getJob,
+  getTotalCacheSizeBytes,
   initializeDatabase,
   isJobCancellationRequested,
+  listCacheChunksForObject,
+  listCacheEvictionCandidates,
+  touchCacheChunk,
+  upsertCacheChunk,
   updateJobProgress,
 } from "@waml/db";
 import {
@@ -23,94 +30,39 @@ import {
   doesRangeOverlap,
   extractLineTimestamp,
   isTimestampInRange,
-  normalizePrefixFilters,
   parseQueryTimestamp,
 } from "@waml/shared";
 import type { SearchJob, SearchMatch } from "@waml/shared";
+import {
+  addTrigrams,
+  buildPatternTrigrams,
+  createObjectCacheKey,
+  getCacheBudgetBytes,
+  getObjectCachePaths,
+  shouldUseTrigramPrefilter,
+} from "./cache";
+import {
+  isGzipObject,
+  looksBinaryBuffer,
+  shouldSkipObjectByContentType,
+  shouldSkipObjectByKey,
+} from "./content-detection";
+import {
+  extractCustomValues,
+  extractHiveValues,
+  objectMatchesFilters,
+} from "./path-filters";
+import { createS3Client, sendWithCredentialRefresh } from "./s3";
+import fsSync from "node:fs";
 import fs from "node:fs/promises";
-import os from "node:os";
-import path from "node:path";
 import { Readable } from "node:stream";
 import { createGunzip } from "node:zlib";
-
-type IniSectionMap = Record<string, Record<string, string>>;
-
-const configPath = path.join(os.homedir(), ".aws", "config");
-const credentialsPath = path.join(os.homedir(), ".aws", "credentials");
 const pollIntervalMs = 600;
 const progressIntervalMs = 500;
 const matchFlushIntervalMs = 250;
 const matchFlushSize = 50;
-const binarySniffBytes = 4096;
-const binaryExtensions = new Set([
-  ".7z",
-  ".avif",
-  ".bin",
-  ".bmp",
-  ".class",
-  ".dll",
-  ".dmg",
-  ".doc",
-  ".docx",
-  ".exe",
-  ".gif",
-  ".ico",
-  ".jar",
-  ".jpeg",
-  ".jpg",
-  ".mov",
-  ".mp3",
-  ".mp4",
-  ".pdf",
-  ".png",
-  ".ppt",
-  ".pptx",
-  ".pyc",
-  ".so",
-  ".tar",
-  ".tgz",
-  ".war",
-  ".webp",
-  ".xls",
-  ".xlsx",
-  ".zip",
-]);
-const textContentTypePrefixes = [
-  "text/",
-];
-const textContentTypes = new Set([
-  "application/json",
-  "application/ld+json",
-  "application/x-ndjson",
-  "application/xml",
-  "application/yaml",
-  "application/x-yaml",
-  "application/csv",
-  "application/javascript",
-  "application/x-javascript",
-  "application/sql",
-]);
-const binaryContentTypePrefixes = [
-  "image/",
-  "audio/",
-  "video/",
-  "font/",
-];
-const binaryContentTypes = new Set([
-  "application/octet-stream",
-  "application/pdf",
-  "application/zip",
-  "application/x-zip-compressed",
-  "application/gzip",
-  "application/x-gzip",
-  "application/x-7z-compressed",
-  "application/x-rar-compressed",
-  "application/vnd.ms-excel",
-  "application/vnd.openxmlformats-officedocument",
-  "application/msword",
-  "application/vnd.ms-powerpoint",
-  "application/java-archive",
-]);
+const cacheChunkLineLimit = 2000;
+const cacheChunkTextBytesLimit = 512 * 1024;
 
 function sleep(durationMs: number) {
   return new Promise((resolve) => {
@@ -118,381 +70,236 @@ function sleep(durationMs: number) {
   });
 }
 
-async function readIfPresent(filepath: string) {
-  try {
-    return await fs.readFile(filepath, "utf8");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      return "";
-    }
-
-    throw error;
-  }
-}
-
-function parseIniSections(content: string) {
-  const sections: IniSectionMap = {};
-  let currentSection: string | null = null;
-
-  for (const rawLine of content.split(/\r?\n/)) {
-    const line = rawLine.trim();
-
-    if (!line || line.startsWith("#") || line.startsWith(";")) {
-      continue;
-    }
-
-    const sectionMatch = line.match(/^\[([^\]]+)\]$/);
-    if (sectionMatch) {
-      currentSection = sectionMatch[1];
-      sections[currentSection] = sections[currentSection] ?? {};
-      continue;
-    }
-
-    if (!currentSection) {
-      continue;
-    }
-
-    const separatorIndex = line.indexOf("=");
-
-    if (separatorIndex === -1) {
-      continue;
-    }
-
-    const key = line.slice(0, separatorIndex).trim();
-    const value = line.slice(separatorIndex + 1).trim();
-    sections[currentSection][key] = value;
-  }
-
-  return sections;
-}
-
-function getProfileRegion(profile: string, configSections: IniSectionMap) {
-  const namedSection = configSections[`profile ${profile}`];
-  const directSection = configSections[profile];
-
-  return (
-    namedSection?.region ??
-    directSection?.region ??
-    process.env.AWS_REGION ??
-    process.env.AWS_DEFAULT_REGION ??
-    "us-east-1"
-  );
-}
-
-async function createS3Client(profile: string) {
-  const configContent = await readIfPresent(configPath);
-  const configSections = parseIniSections(configContent);
-  const region = getProfileRegion(profile, configSections);
-
-  return new S3Client({
-    region,
-    credentials: fromIni({ profile }),
-  });
-}
-
-function isRetryableCredentialError(error: unknown) {
-  if (!error || typeof error !== "object") {
-    return false;
-  }
-
-  const candidate = error as {
-    name?: string;
-    Code?: string;
-    code?: string;
-    message?: string;
-  };
-  const code = candidate.name ?? candidate.Code ?? candidate.code ?? "";
-  const message = candidate.message ?? "";
-
-  return (
-    code === "ExpiredToken" ||
-    code === "InvalidAccessKeyId" ||
-    code === "RequestExpired" ||
-    code === "CredentialsProviderError" ||
-    message.includes("ExpiredToken") ||
-    message.includes("InvalidAccessKeyId") ||
-    message.includes("The security token included in the request is expired")
-  );
-}
-
-async function sendWithCredentialRefresh<T>({
-  clientRef,
-  profile,
-  operation,
+async function scanCachedTextFile({
+  filepath,
+  job,
+  objectKey,
+  progress,
+  pendingMatches,
+  lastProgressAt,
+  lastMatchAt,
+  queryStartEpochMs,
+  queryEndEpochMs,
 }: {
-  clientRef: { current: S3Client };
-  profile: string;
-  operation: (client: S3Client) => Promise<T>;
+  filepath: string;
+  job: SearchJob;
+  objectKey: string;
+  progress: SearchJob["progress"];
+  pendingMatches: SearchMatch[];
+  lastProgressAt: { value: number };
+  lastMatchAt: { value: number };
+  queryStartEpochMs: number | null;
+  queryEndEpochMs: number | null;
 }) {
-  try {
-    return await operation(clientRef.current);
-  } catch (error) {
-    if (!isRetryableCredentialError(error)) {
-      throw error;
+  const matcher = createSubstringMatcher(job);
+  const decoder = new TextDecoder("utf-8");
+  const stream = fsSync.createReadStream(filepath);
+  let bufferedText = "";
+  let lineNumber = 0;
+
+  for await (const rawChunk of stream) {
+    if (isJobCancellationRequested(job.id)) {
+      stream.destroy();
+      throw new Error("JOB_CANCELLED");
     }
 
-    clientRef.current = await createS3Client(profile);
-    return operation(clientRef.current);
-  }
-}
+    const chunkBuffer = Buffer.isBuffer(rawChunk)
+      ? rawChunk
+      : Buffer.from(rawChunk);
+    progress.bytesScanned += chunkBuffer.byteLength;
+    bufferedText += decoder.decode(chunkBuffer, { stream: true });
 
-function escapeRegExp(value: string) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
+    const lines = bufferedText.split(/\r?\n/);
+    bufferedText = lines.pop() ?? "";
 
-function extractHiveValues(relativePath: string) {
-  const values: Record<string, string> = {};
-  const segments = relativePath.split("/").filter(Boolean);
+    for (const lineText of lines) {
+      lineNumber += 1;
 
-  for (const segment of segments) {
-    const match = segment.match(/^([^=\/]+)=(.+)$/);
+      if (!matcher.matches(lineText)) {
+        continue;
+      }
 
-    if (match) {
-      values[match[1]] = match[2];
+      const timestampResult = extractLineTimestamp(
+        job.timeConfig.lineParser,
+        lineText,
+        job.timeConfig.timezone,
+      );
+      const parsedLineTimestamp = timestampResult.lineTimestamp
+        ? parseQueryTimestamp(timestampResult.lineTimestamp)
+        : null;
+
+      if (
+        (queryStartEpochMs !== null || queryEndEpochMs !== null) &&
+        job.timeConfig.lineParser.mode !== "none" &&
+        (parsedLineTimestamp === null ||
+          !isTimestampInRange(
+            parsedLineTimestamp,
+            queryStartEpochMs,
+            queryEndEpochMs,
+          ))
+      ) {
+        continue;
+      }
+
+      pendingMatches.push({
+        objectKey,
+        lineNumber,
+        lineText,
+        timestampText: timestampResult.lineTimestamp ?? undefined,
+      });
+      progress.matchesFound += 1;
+    }
+
+    const now = Date.now();
+
+    if (
+      pendingMatches.length >= matchFlushSize ||
+      now - lastMatchAt.value >= matchFlushIntervalMs
+    ) {
+      await flushMatches(job.id, pendingMatches);
+      lastMatchAt.value = now;
+    }
+
+    if (now - lastProgressAt.value >= progressIntervalMs) {
+      await flushProgress(job.id, progress);
+      lastProgressAt.value = now;
     }
   }
 
-  return values;
-}
+  bufferedText += decoder.decode();
 
-function compileCustomPathPattern(pathPattern: string) {
-  const normalizedPattern = pathPattern.trim().replace(/^\/+|\/+$/g, "");
-  const capturePattern = /\{(category|range):([A-Za-z_][A-Za-z0-9_]*)\}/g;
-  const captures: Array<{ key: string }> = [];
-  let regexSource = "^";
-  let lastIndex = 0;
+  if (bufferedText && matcher.matches(bufferedText)) {
+    lineNumber += 1;
+    const timestampResult = extractLineTimestamp(
+      job.timeConfig.lineParser,
+      bufferedText,
+      job.timeConfig.timezone,
+    );
+    const parsedLineTimestamp = timestampResult.lineTimestamp
+      ? parseQueryTimestamp(timestampResult.lineTimestamp)
+      : null;
 
-  for (const match of normalizedPattern.matchAll(capturePattern)) {
-    const [fullMatch, , key] = match;
-    const matchIndex = match.index ?? 0;
-    regexSource += escapeRegExp(normalizedPattern.slice(lastIndex, matchIndex));
-    regexSource += "([^/]+)";
-    captures.push({ key });
-    lastIndex = matchIndex + fullMatch.length;
-  }
-
-  regexSource += escapeRegExp(normalizedPattern.slice(lastIndex));
-  regexSource += "/?$";
-
-  return {
-    regex: new RegExp(regexSource),
-    captures,
-  };
-}
-
-function extractCustomValues(relativePath: string, pathPattern: string) {
-  const trimmedPattern = pathPattern.trim();
-
-  if (!trimmedPattern) {
-    return null;
-  }
-
-  const compiled = compileCustomPathPattern(trimmedPattern);
-  const match = relativePath.replace(/\/+$/, "").match(compiled.regex);
-
-  if (!match) {
-    return null;
-  }
-
-  const values: Record<string, string> = {};
-
-  compiled.captures.forEach((capture, index) => {
-    const value = match[index + 1];
-
-    if (value) {
-      values[capture.key] = value;
+    if (
+      (queryStartEpochMs === null && queryEndEpochMs === null) ||
+      job.timeConfig.lineParser.mode === "none" ||
+      (parsedLineTimestamp !== null &&
+        isTimestampInRange(parsedLineTimestamp, queryStartEpochMs, queryEndEpochMs))
+    ) {
+      pendingMatches.push({
+        objectKey,
+        lineNumber,
+        lineText: bufferedText,
+        timestampText: timestampResult.lineTimestamp ?? undefined,
+      });
+      progress.matchesFound += 1;
     }
+  }
+}
+
+async function writeCachedChunkArtifact({
+  job,
+  objectKey,
+  etag,
+  objectSize,
+  chunkId,
+  chunkText,
+  byteStart,
+  byteEnd,
+}: {
+  job: SearchJob;
+  objectKey: string;
+  etag: string;
+  objectSize: number;
+  chunkId: string;
+  chunkText: string;
+  byteStart: number;
+  byteEnd: number;
+}) {
+  const chunkPk = createObjectCacheKey(job.source.bucket, objectKey, etag, chunkId);
+  const cachePaths = getObjectCachePaths(chunkPk);
+  const tempTextPath = `${cachePaths.textPath}.${process.pid}.tmp`;
+  const tempTrigramPath = `${cachePaths.trigramPath}.${process.pid}.tmp`;
+  const trigramSet = new Set<string>();
+  addTrigrams(trigramSet, chunkText);
+
+  await fs.mkdir(cachePaths.directory, { recursive: true });
+  await fs.writeFile(tempTextPath, chunkText, "utf8");
+  await fs.writeFile(
+    tempTrigramPath,
+    JSON.stringify([...trigramSet.values()].sort()),
+    "utf8",
+  );
+  await fs.rename(tempTextPath, cachePaths.textPath);
+  await fs.rename(tempTrigramPath, cachePaths.trigramPath);
+
+  const [textStats, trigramStats] = await Promise.all([
+    fs.stat(cachePaths.textPath),
+    fs.stat(cachePaths.trigramPath),
+  ]);
+
+  const cacheSizeBytes = textStats.size + trigramStats.size;
+  const lineCount =
+    chunkText.length === 0 ? 0 : chunkText.split(/\r?\n/).length;
+
+  upsertCacheChunk({
+    chunkPk,
+    bucket: job.source.bucket,
+    objectKey,
+    etag,
+    chunkId,
+    byteStart,
+    byteEnd: Math.min(byteEnd, objectSize),
+    artifactPath: cachePaths.trigramPath,
+    textCachePath: cachePaths.textPath,
+    cacheSizeBytes,
+    trigramCount: trigramSet.size,
+    lineCount,
   });
-
-  return values;
-}
-
-function parseComparableNumber(value: string) {
-  if (!/^-?\d+(\.\d+)?$/.test(value.trim())) {
-    return null;
-  }
-
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : null;
-}
-
-function parseComparableTimestamp(value: string) {
-  const trimmed = value.trim();
-
-  if (/^\d{6}$/.test(trimmed)) {
-    const year = Number(trimmed.slice(0, 4));
-    const month = Number(trimmed.slice(4, 6));
-    return Date.UTC(year, month - 1, 1, 0, 0, 0, 0);
-  }
-
-  if (/^\d{8}$/.test(trimmed)) {
-    const year = Number(trimmed.slice(0, 4));
-    const month = Number(trimmed.slice(4, 6));
-    const day = Number(trimmed.slice(6, 8));
-    return Date.UTC(year, month - 1, day, 0, 0, 0, 0);
-  }
-
-  if (/^\d{10}$/.test(trimmed)) {
-    const year = Number(trimmed.slice(0, 4));
-    const month = Number(trimmed.slice(4, 6));
-    const day = Number(trimmed.slice(6, 8));
-    const hour = Number(trimmed.slice(8, 10));
-    return Date.UTC(year, month - 1, day, hour, 0, 0, 0);
-  }
-
-  if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
-    const parsed = Date.parse(`${trimmed}T00:00:00Z`);
-    return Number.isNaN(parsed) ? null : parsed;
-  }
-
-  if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(trimmed)) {
-    const parsed = Date.parse(trimmed.replace(" ", "T") + "Z");
-    return Number.isNaN(parsed) ? null : parsed;
-  }
-
-  if (
-    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(
-      trimmed,
-    )
-  ) {
-    const parsed = Date.parse(trimmed);
-    return Number.isNaN(parsed) ? null : parsed;
-  }
-
-  return null;
-}
-
-function compareRangeValues(left: string, right: string) {
-  const leftNumber = parseComparableNumber(left);
-  const rightNumber = parseComparableNumber(right);
-
-  if (leftNumber !== null && rightNumber !== null) {
-    return leftNumber - rightNumber;
-  }
-
-  const leftTimestamp = parseComparableTimestamp(left);
-  const rightTimestamp = parseComparableTimestamp(right);
-
-  if (leftTimestamp !== null && rightTimestamp !== null) {
-    return leftTimestamp - rightTimestamp;
-  }
-
-  return left.localeCompare(right);
-}
-
-function objectMatchesFilters(job: SearchJob, objectKey: string) {
-  const rootPrefix = job.source.rootPrefix.trim();
-  const relativePath = rootPrefix ? objectKey.slice(rootPrefix.length) : objectKey;
-  const filterEntries = Object.entries(normalizePrefixFilters(job.prefixFilters));
-
-  if (filterEntries.length === 0) {
-    return true;
-  }
-
-  const customValues = extractCustomValues(relativePath, job.customPathPattern);
-  const values = customValues ?? extractHiveValues(relativePath);
-
-  return filterEntries.every(([key, filter]) => {
-    const objectValue = values[key];
-
-    if (!objectValue) {
-      return false;
-    }
-
-    if (filter.mode === "values") {
-      return filter.values.includes(objectValue);
-    }
-
-    if (filter.start && compareRangeValues(objectValue, filter.start) < 0) {
-      return false;
-    }
-
-    if (filter.end && compareRangeValues(objectValue, filter.end) > 0) {
-      return false;
-    }
-
-    return true;
+  appendJobEvent(job.id, "cache.write", {
+    objectKey,
+    chunkPk,
+    chunkId,
+    cacheSizeBytes,
+    trigramCount: trigramSet.size,
   });
 }
 
-function shouldSkipObjectByKey(objectKey: string) {
-  const lowerKey = objectKey.toLocaleLowerCase();
+async function enforceCacheBudget(jobId: string) {
+  const budgetBytes = getCacheBudgetBytes();
+  let totalBytes = getTotalCacheSizeBytes();
 
-  for (const extension of binaryExtensions) {
-    if (lowerKey.endsWith(extension)) {
-      return true;
-    }
+  if (totalBytes <= budgetBytes) {
+    return;
   }
 
-  return false;
-}
+  const candidates = listCacheEvictionCandidates(200);
 
-function isGzipObject(objectKey: string) {
-  return objectKey.toLocaleLowerCase().endsWith(".gz");
-}
-
-function normalizeContentType(contentType?: string | null) {
-  if (!contentType) {
-    return null;
-  }
-
-  return contentType.split(";")[0]?.trim().toLocaleLowerCase() || null;
-}
-
-function shouldSkipObjectByContentType(contentType?: string | null) {
-  const normalized = normalizeContentType(contentType);
-
-  if (!normalized) {
-    return false;
-  }
-
-  if (textContentTypes.has(normalized)) {
-    return false;
-  }
-
-  for (const prefix of textContentTypePrefixes) {
-    if (normalized.startsWith(prefix)) {
-      return false;
-    }
-  }
-
-  if (binaryContentTypes.has(normalized)) {
-    return true;
-  }
-
-  for (const prefix of binaryContentTypePrefixes) {
-    if (normalized.startsWith(prefix)) {
-      return true;
-    }
-  }
-
-  return false;
-}
-
-function looksBinaryBuffer(chunkBuffer: Buffer) {
-  const sample = chunkBuffer.subarray(0, binarySniffBytes);
-
-  if (sample.length === 0) {
-    return false;
-  }
-
-  let suspiciousBytes = 0;
-
-  for (const byte of sample) {
-    if (byte === 0) {
-      return true;
+  for (const candidate of candidates) {
+    if (totalBytes <= budgetBytes) {
+      break;
     }
 
-    const isAllowedControl = byte === 9 || byte === 10 || byte === 13;
-    const isPrintableAscii = byte >= 32 && byte <= 126;
-    const isExtendedUtf8Byte = byte >= 128;
+    const removed = deleteCacheChunk(candidate.chunkPk);
 
-    if (!isAllowedControl && !isPrintableAscii && !isExtendedUtf8Byte) {
-      suspiciousBytes += 1;
+    if (!removed) {
+      continue;
     }
-  }
 
-  return suspiciousBytes / sample.length > 0.2;
+    await Promise.allSettled([
+      fs.rm(removed.artifactPath, { force: true }),
+      removed.textCachePath
+        ? fs.rm(removed.textCachePath, { force: true })
+        : Promise.resolve(),
+    ]);
+
+    totalBytes -= removed.cacheSizeBytes;
+    appendJobEvent(jobId, "cache.evicted", {
+      objectKey: removed.objectKey,
+      chunkPk: removed.chunkPk,
+      chunkId: removed.chunkId,
+      cacheSizeBytes: removed.cacheSizeBytes,
+    });
+  }
 }
 
 function createSubstringMatcher(job: SearchJob) {
@@ -537,6 +344,8 @@ async function processObject({
   clientRef,
   job,
   objectKey,
+  etag,
+  objectSize,
   relativePath,
   progress,
   pendingMatches,
@@ -548,6 +357,8 @@ async function processObject({
   clientRef: { current: S3Client };
   job: SearchJob;
   objectKey: string;
+  etag: string;
+  objectSize: number;
   relativePath: string;
   progress: SearchJob["progress"];
   pendingMatches: SearchMatch[];
@@ -558,6 +369,7 @@ async function processObject({
 }) {
   const matcher = createSubstringMatcher(job);
   const gzipObject = isGzipObject(objectKey);
+  const cachedChunks = listCacheChunksForObject(job.source.bucket, objectKey, etag);
   const partitionValues =
     extractCustomValues(relativePath, job.customPathPattern) ??
     extractHiveValues(relativePath);
@@ -567,14 +379,6 @@ async function processObject({
     job.timeConfig.timezone,
   ).range;
 
-  if (!gzipObject && shouldSkipObjectByKey(objectKey)) {
-    appendJobEvent(job.id, "object.skipped", {
-      objectKey,
-      reason: "binary_extension",
-    });
-    return;
-  }
-
   if (
     (queryStartEpochMs !== null || queryEndEpochMs !== null) &&
     !doesRangeOverlap(coarseTimeRange, queryStartEpochMs, queryEndEpochMs)
@@ -582,6 +386,99 @@ async function processObject({
     appendJobEvent(job.id, "object.skipped", {
       objectKey,
       reason: "time_range_prune",
+    });
+    return;
+  }
+
+  const validCachedChunks = cachedChunks.filter(
+    (chunk) =>
+      fsSync.existsSync(chunk.artifactPath) &&
+      chunk.textCachePath !== null &&
+      fsSync.existsSync(chunk.textCachePath),
+  );
+
+  if (cachedChunks.length > 0 && validCachedChunks.length === cachedChunks.length) {
+    appendJobEvent(job.id, "object.started", { objectKey, source: "cache" });
+    progress.objectsScanned += 1;
+
+    for (const cachedChunk of validCachedChunks) {
+      const chunkPk = cachedChunk.chunkPk;
+      let trigramRejected = false;
+
+      if (shouldUseTrigramPrefilter(job)) {
+        try {
+          const patternTrigrams = [...buildPatternTrigrams(job.pattern)];
+          const cachedTrigrams = new Set<string>(
+            JSON.parse(await fs.readFile(cachedChunk.artifactPath, "utf8")) as string[],
+          );
+          trigramRejected = patternTrigrams.some(
+            (trigram) => !cachedTrigrams.has(trigram),
+          );
+        } catch {
+          trigramRejected = false;
+        }
+      }
+
+      touchCacheChunk(chunkPk);
+      appendJobEvent(job.id, "cache.hit", {
+        objectKey,
+        chunkPk,
+        chunkId: cachedChunk.chunkId,
+        trigramRejected,
+      });
+
+      if (trigramRejected) {
+        appendJobEvent(job.id, "object.skipped", {
+          objectKey,
+          reason: "cache_trigram_prune",
+          chunkId: cachedChunk.chunkId,
+        });
+        continue;
+      }
+
+      appendJobEvent(job.id, "chunk.started", {
+        objectKey,
+        chunkId: cachedChunk.chunkId,
+        source: "cache",
+      });
+      progress.chunksScanned += 1;
+
+      await scanCachedTextFile({
+        filepath: cachedChunk.textCachePath!,
+        job,
+        objectKey,
+        progress,
+        pendingMatches,
+        lastProgressAt,
+        lastMatchAt,
+        queryStartEpochMs,
+        queryEndEpochMs,
+      });
+    }
+    return;
+  }
+
+  if (cachedChunks.length > 0) {
+    const staleChunks = deleteCacheChunksForObject(job.source.bucket, objectKey, etag);
+    await Promise.allSettled(
+      staleChunks.flatMap((chunk) => [
+        fs.rm(chunk.artifactPath, { force: true }),
+        chunk.textCachePath
+          ? fs.rm(chunk.textCachePath, { force: true })
+          : Promise.resolve(),
+      ]),
+    );
+  }
+
+  appendJobEvent(job.id, "cache.miss", {
+    objectKey,
+    chunkCount: 0,
+  });
+
+  if (!gzipObject && shouldSkipObjectByKey(objectKey)) {
+    appendJobEvent(job.id, "object.skipped", {
+      objectKey,
+      reason: "binary_extension",
     });
     return;
   }
@@ -629,138 +526,187 @@ async function processObject({
     : sourceStream;
 
   appendJobEvent(job.id, "object.started", { objectKey });
-  appendJobEvent(job.id, "chunk.started", { objectKey, chunkId: "0" });
-
   progress.objectsScanned += 1;
-  progress.chunksScanned += 1;
 
   const decoder = new TextDecoder("utf-8");
   let bufferedText = "";
   let lineNumber = 0;
   let inspectedFirstChunk = false;
+  let chunkIndex = 0;
+  let chunkTextParts: string[] = [];
+  let chunkTextBytes = 0;
+  let chunkLineCount = 0;
+  let chunkByteStart = 0;
 
-  for await (const rawChunk of decodedBody) {
-    if (isJobCancellationRequested(job.id)) {
-      controller.abort();
-      decodedBody.destroy();
-      throw new Error("JOB_CANCELLED");
+  async function flushChunk(force = false) {
+    if (!force && chunkLineCount < cacheChunkLineLimit && chunkTextBytes < cacheChunkTextBytesLimit) {
+      return;
     }
 
-    const chunkBuffer =
-      typeof rawChunk === "string" ? Buffer.from(rawChunk) : Buffer.from(rawChunk);
+    if (chunkTextParts.length === 0) {
+      return;
+    }
 
-    if (!inspectedFirstChunk) {
-      inspectedFirstChunk = true;
-
-      if (looksBinaryBuffer(chunkBuffer)) {
+    const chunkText = chunkTextParts.join("");
+    const chunkId = String(chunkIndex);
+    appendJobEvent(job.id, "chunk.started", {
+      objectKey,
+      chunkId,
+      source: "stream",
+    });
+    progress.chunksScanned += 1;
+    await writeCachedChunkArtifact({
+      job,
+      objectKey,
+      etag,
+      objectSize,
+      chunkId,
+      chunkText,
+      byteStart: chunkByteStart,
+      byteEnd: chunkByteStart + chunkTextBytes,
+    });
+    chunkIndex += 1;
+    chunkByteStart += chunkTextBytes;
+    chunkTextParts = [];
+    chunkTextBytes = 0;
+    chunkLineCount = 0;
+  }
+  try {
+    for await (const rawChunk of decodedBody) {
+      if (isJobCancellationRequested(job.id)) {
         controller.abort();
-        appendJobEvent(job.id, "object.skipped", {
-          objectKey,
-          reason: "binary_sniff",
-        });
-        return;
-      }
-    }
-
-    progress.bytesScanned += chunkBuffer.byteLength;
-    bufferedText += decoder.decode(chunkBuffer, { stream: true });
-
-    const lines = bufferedText.split(/\r?\n/);
-    bufferedText = lines.pop() ?? "";
-
-    for (const lineText of lines) {
-      lineNumber += 1;
-
-      if (!matcher.matches(lineText)) {
-        continue;
+        decodedBody.destroy();
+        throw new Error("JOB_CANCELLED");
       }
 
-      const timestampResult = extractLineTimestamp(
-        job.timeConfig.lineParser,
-        lineText,
-        job.timeConfig.timezone,
-      );
-      const parsedLineTimestamp = timestampResult.lineTimestamp
-        ? parseQueryTimestamp(timestampResult.lineTimestamp)
-        : null;
+      const chunkBuffer =
+        typeof rawChunk === "string" ? Buffer.from(rawChunk) : Buffer.from(rawChunk);
 
-      if (
-        (queryStartEpochMs !== null || queryEndEpochMs !== null) &&
-        job.timeConfig.lineParser.mode !== "none"
-      ) {
-        if (
-          parsedLineTimestamp === null ||
-          !isTimestampInRange(
-            parsedLineTimestamp,
-            queryStartEpochMs,
-            queryEndEpochMs,
-          )
-        ) {
-          continue;
+      if (!inspectedFirstChunk) {
+        inspectedFirstChunk = true;
+
+        if (looksBinaryBuffer(chunkBuffer)) {
+          controller.abort();
+          appendJobEvent(job.id, "object.skipped", {
+            objectKey,
+            reason: "binary_sniff",
+          });
+          return;
         }
       }
 
-      pendingMatches.push({
-        objectKey,
-        lineNumber,
-        lineText,
-        timestampText: timestampResult.lineTimestamp ?? undefined,
-      });
-      progress.matchesFound += 1;
-    }
+      progress.bytesScanned += chunkBuffer.byteLength;
+      const decodedChunk = decoder.decode(chunkBuffer, { stream: true });
+      bufferedText += decodedChunk;
 
-    const now = Date.now();
+      const lines = bufferedText.split(/\r?\n/);
+      bufferedText = lines.pop() ?? "";
 
-    if (
-      pendingMatches.length >= matchFlushSize ||
-      now - lastMatchAt.value >= matchFlushIntervalMs
-    ) {
-      await flushMatches(job.id, pendingMatches);
-      lastMatchAt.value = now;
-    }
+      for (const lineText of lines) {
+        lineNumber += 1;
+        const lineWithNewline = `${lineText}\n`;
+        chunkTextParts.push(lineWithNewline);
+        chunkTextBytes += Buffer.byteLength(lineWithNewline);
+        chunkLineCount += 1;
 
-    if (now - lastProgressAt.value >= progressIntervalMs) {
-      await flushProgress(job.id, progress);
-      lastProgressAt.value = now;
-    }
-  }
+        if (!matcher.matches(lineText)) {
+          await flushChunk();
+          continue;
+        }
 
-  bufferedText += decoder.decode();
+        const timestampResult = extractLineTimestamp(
+          job.timeConfig.lineParser,
+          lineText,
+          job.timeConfig.timezone,
+        );
+        const parsedLineTimestamp = timestampResult.lineTimestamp
+          ? parseQueryTimestamp(timestampResult.lineTimestamp)
+          : null;
 
-  if (bufferedText) {
-    lineNumber += 1;
+        if (
+          (queryStartEpochMs !== null || queryEndEpochMs !== null) &&
+          job.timeConfig.lineParser.mode !== "none"
+        ) {
+          if (
+            parsedLineTimestamp === null ||
+            !isTimestampInRange(
+              parsedLineTimestamp,
+              queryStartEpochMs,
+              queryEndEpochMs,
+            )
+          ) {
+            continue;
+          }
+        }
 
-    if (matcher.matches(bufferedText)) {
-      const timestampResult = extractLineTimestamp(
-        job.timeConfig.lineParser,
-        bufferedText,
-        job.timeConfig.timezone,
-      );
-      const parsedLineTimestamp = timestampResult.lineTimestamp
-        ? parseQueryTimestamp(timestampResult.lineTimestamp)
-        : null;
-
-      if (
-        (queryStartEpochMs !== null || queryEndEpochMs !== null) &&
-        job.timeConfig.lineParser.mode !== "none" &&
-        (parsedLineTimestamp === null ||
-          !isTimestampInRange(
-            parsedLineTimestamp,
-            queryStartEpochMs,
-            queryEndEpochMs,
-          ))
-      ) {
-        return;
+        pendingMatches.push({
+          objectKey,
+          lineNumber,
+          lineText,
+          timestampText: timestampResult.lineTimestamp ?? undefined,
+        });
+        progress.matchesFound += 1;
+        await flushChunk();
       }
 
-      pendingMatches.push({
-        objectKey,
-        lineNumber,
-        lineText: bufferedText,
-        timestampText: timestampResult.lineTimestamp ?? undefined,
-      });
-      progress.matchesFound += 1;
+      const now = Date.now();
+
+      if (
+        pendingMatches.length >= matchFlushSize ||
+        now - lastMatchAt.value >= matchFlushIntervalMs
+      ) {
+        await flushMatches(job.id, pendingMatches);
+        lastMatchAt.value = now;
+      }
+
+      if (now - lastProgressAt.value >= progressIntervalMs) {
+        await flushProgress(job.id, progress);
+        lastProgressAt.value = now;
+      }
     }
+
+    bufferedText += decoder.decode();
+
+    if (bufferedText) {
+      lineNumber += 1;
+      chunkTextParts.push(bufferedText);
+      chunkTextBytes += Buffer.byteLength(bufferedText);
+      chunkLineCount += 1;
+
+      if (matcher.matches(bufferedText)) {
+        const timestampResult = extractLineTimestamp(
+          job.timeConfig.lineParser,
+          bufferedText,
+          job.timeConfig.timezone,
+        );
+        const parsedLineTimestamp = timestampResult.lineTimestamp
+          ? parseQueryTimestamp(timestampResult.lineTimestamp)
+          : null;
+
+        if (
+          (queryStartEpochMs === null && queryEndEpochMs === null) ||
+          job.timeConfig.lineParser.mode === "none" ||
+          (parsedLineTimestamp !== null &&
+            isTimestampInRange(
+              parsedLineTimestamp,
+              queryStartEpochMs,
+              queryEndEpochMs,
+            ))
+        ) {
+          pendingMatches.push({
+            objectKey,
+            lineNumber,
+            lineText: bufferedText,
+            timestampText: timestampResult.lineTimestamp ?? undefined,
+          });
+          progress.matchesFound += 1;
+        }
+      }
+    }
+    await flushChunk(true);
+    await enforceCacheBudget(job.id);
+  } finally {
+    // Chunk artifacts are committed chunk-by-chunk; no object-level temp files remain here.
   }
 }
 
@@ -804,23 +750,44 @@ async function runSearchJob(job: SearchJob) {
         ),
     });
 
-    const objectKeys = (response.Contents ?? [])
-      .map((entry: { Key?: string }) => entry.Key)
-      .filter((value): value is string => Boolean(value))
-      .filter((value) => value !== job.source.rootPrefix);
+    const objects = (response.Contents ?? [])
+      .map(
+        (entry: {
+          Key?: string;
+          ETag?: string;
+          Size?: number;
+        }) => ({
+          key: entry.Key,
+          etag: entry.ETag?.replaceAll('"', "") ?? "",
+          size: entry.Size ?? 0,
+        }),
+      )
+      .filter(
+        (
+          entry,
+        ): entry is {
+          key: string;
+          etag: string;
+          size: number;
+        } => Boolean(entry.key) && entry.key !== job.source.rootPrefix,
+      );
 
-    for (const objectKey of objectKeys) {
-      if (!objectMatchesFilters(job, objectKey)) {
+    for (const object of objects) {
+      if (!objectMatchesFilters(job, object.key)) {
         continue;
       }
 
       const rootPrefix = job.source.rootPrefix.trim();
-      const relativePath = rootPrefix ? objectKey.slice(rootPrefix.length) : objectKey;
+      const relativePath = rootPrefix
+        ? object.key.slice(rootPrefix.length)
+        : object.key;
 
       await processObject({
         clientRef,
         job,
-        objectKey,
+        objectKey: object.key,
+        etag: object.etag,
+        objectSize: object.size,
         relativePath,
         progress,
         pendingMatches,
