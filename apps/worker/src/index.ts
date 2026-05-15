@@ -18,6 +18,13 @@ import {
   isJobCancellationRequested,
   updateJobProgress,
 } from "@waml/db";
+import {
+  deriveCoarseTimeRangeFromMappings,
+  doesRangeOverlap,
+  extractLineTimestamp,
+  isTimestampInRange,
+  parseQueryTimestamp,
+} from "@waml/shared";
 import type { SearchJob, SearchMatch } from "@waml/shared";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -232,14 +239,6 @@ function objectMatchesFilters(job: SearchJob, objectKey: string) {
   return filterEntries.every(([key, value]) => values[key] === value);
 }
 
-function extractTimestamp(lineText: string) {
-  const match = lineText.match(
-    /\b(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z?)\b/,
-  );
-
-  return match?.[1];
-}
-
 function shouldSkipObjectByKey(objectKey: string) {
   const lowerKey = objectKey.toLocaleLowerCase();
 
@@ -324,26 +323,50 @@ async function processObject({
   client,
   job,
   objectKey,
+  relativePath,
   progress,
   pendingMatches,
   lastProgressAt,
   lastMatchAt,
+  queryStartEpochMs,
+  queryEndEpochMs,
 }: {
   client: S3Client;
   job: SearchJob;
   objectKey: string;
+  relativePath: string;
   progress: SearchJob["progress"];
   pendingMatches: SearchMatch[];
   lastProgressAt: { value: number };
   lastMatchAt: { value: number };
+  queryStartEpochMs: number | null;
+  queryEndEpochMs: number | null;
 }) {
   const matcher = createSubstringMatcher(job);
   const gzipObject = isGzipObject(objectKey);
+  const partitionValues =
+    extractCustomValues(relativePath, job.customPathPattern) ??
+    extractHiveValues(relativePath);
+  const coarseTimeRange = deriveCoarseTimeRangeFromMappings(
+    job.timeConfig.pathMappings,
+    partitionValues,
+  ).range;
 
   if (!gzipObject && shouldSkipObjectByKey(objectKey)) {
     appendJobEvent(job.id, "object.skipped", {
       objectKey,
       reason: "binary_extension",
+    });
+    return;
+  }
+
+  if (
+    (queryStartEpochMs !== null || queryEndEpochMs !== null) &&
+    !doesRangeOverlap(coarseTimeRange, queryStartEpochMs, queryEndEpochMs)
+  ) {
+    appendJobEvent(job.id, "object.skipped", {
+      objectKey,
+      reason: "time_range_prune",
     });
     return;
   }
@@ -420,11 +443,35 @@ async function processObject({
         continue;
       }
 
+      const timestampResult = extractLineTimestamp(
+        job.timeConfig.lineParser,
+        lineText,
+      );
+      const parsedLineTimestamp = timestampResult.lineTimestamp
+        ? parseQueryTimestamp(timestampResult.lineTimestamp)
+        : null;
+
+      if (
+        (queryStartEpochMs !== null || queryEndEpochMs !== null) &&
+        job.timeConfig.lineParser.mode !== "none"
+      ) {
+        if (
+          parsedLineTimestamp === null ||
+          !isTimestampInRange(
+            parsedLineTimestamp,
+            queryStartEpochMs,
+            queryEndEpochMs,
+          )
+        ) {
+          continue;
+        }
+      }
+
       pendingMatches.push({
         objectKey,
         lineNumber,
         lineText,
-        timestampText: extractTimestamp(lineText),
+        timestampText: timestampResult.lineTimestamp ?? undefined,
       });
       progress.matchesFound += 1;
     }
@@ -451,11 +498,32 @@ async function processObject({
     lineNumber += 1;
 
     if (matcher.matches(bufferedText)) {
+      const timestampResult = extractLineTimestamp(
+        job.timeConfig.lineParser,
+        bufferedText,
+      );
+      const parsedLineTimestamp = timestampResult.lineTimestamp
+        ? parseQueryTimestamp(timestampResult.lineTimestamp)
+        : null;
+
+      if (
+        (queryStartEpochMs !== null || queryEndEpochMs !== null) &&
+        job.timeConfig.lineParser.mode !== "none" &&
+        (parsedLineTimestamp === null ||
+          !isTimestampInRange(
+            parsedLineTimestamp,
+            queryStartEpochMs,
+            queryEndEpochMs,
+          ))
+      ) {
+        return;
+      }
+
       pendingMatches.push({
         objectKey,
         lineNumber,
         lineText: bufferedText,
-        timestampText: extractTimestamp(bufferedText),
+        timestampText: timestampResult.lineTimestamp ?? undefined,
       });
       progress.matchesFound += 1;
     }
@@ -469,6 +537,8 @@ async function runSearchJob(job: SearchJob) {
   const lastProgressAt = { value: Date.now() };
   const lastMatchAt = { value: Date.now() };
   let continuationToken: string | undefined;
+  const queryStartEpochMs = parseQueryTimestamp(job.startTime);
+  const queryEndEpochMs = parseQueryTimestamp(job.endTime);
 
   while (true) {
     if (isJobCancellationRequested(job.id)) {
@@ -497,14 +567,20 @@ async function runSearchJob(job: SearchJob) {
         continue;
       }
 
+      const rootPrefix = job.source.rootPrefix.trim();
+      const relativePath = rootPrefix ? objectKey.slice(rootPrefix.length) : objectKey;
+
       await processObject({
         client,
         job,
         objectKey,
+        relativePath,
         progress,
         pendingMatches,
         lastProgressAt,
         lastMatchAt,
+        queryStartEpochMs,
+        queryEndEpochMs,
       });
     }
 

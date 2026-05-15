@@ -484,6 +484,12 @@ select:focus {
   grid-column: 1 / -1;
 }
 
+.search-time-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 12px;
+}
+
 .search-option-toggle {
   display: inline-flex;
   align-items: center;
@@ -772,7 +778,8 @@ select:focus {
   }
 
   .time-mapping-row,
-  .time-parser-grid {
+  .time-parser-grid,
+  .search-time-grid {
     grid-template-columns: 1fr;
   }
 

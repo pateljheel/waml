@@ -33,6 +33,8 @@ type Notebook = {
   >;
   partitionFilters: Record<string, string>;
   query: string;
+  startTime: string;
+  endTime: string;
   range: string;
   updatedAt: string;
 };
@@ -88,6 +90,8 @@ const initialNotebooks: Notebook[] = [
     partitionOverrides: {},
     partitionFilters: {},
     query: 'timeout while awaiting headers service="checkout-api"',
+    startTime: "",
+    endTime: "",
     range: "Last 90 min",
     updatedAt: "2 min ago",
   },
@@ -107,6 +111,8 @@ const initialNotebooks: Notebook[] = [
     partitionOverrides: {},
     partitionFilters: {},
     query: 'token refresh failed service="auth-service"',
+    startTime: "",
+    endTime: "",
     range: "Today",
     updatedAt: "14 min ago",
   },
@@ -126,6 +132,8 @@ const initialNotebooks: Notebook[] = [
     partitionOverrides: {},
     partitionFilters: {},
     query: 'consumer lag service="worker-ingest"',
+    startTime: "",
+    endTime: "",
     range: "May 2026",
     updatedAt: "Yesterday",
   },
@@ -217,6 +225,8 @@ function normalizeNotebook(notebook: Partial<Notebook> & Pick<Notebook, "id" | "
     partitionOverrides: {},
     partitionFilters: {},
     query: "",
+    startTime: "",
+    endTime: "",
     range: "",
     updatedAt: "Just now",
     ...notebook,
@@ -522,8 +532,8 @@ export default function HomePage() {
         notebookId: activeNotebook.id,
         mode: "substring",
         pattern,
-        startTime: "",
-        endTime: "",
+        startTime: activeNotebook.startTime,
+        endTime: activeNotebook.endTime,
         source: {
           awsProfile: activeNotebook.awsProfile,
           bucket: activeNotebook.bucket,
@@ -606,6 +616,8 @@ export default function HomePage() {
       partitionOverrides: activeNotebook.partitionOverrides ?? {},
       partitionFilters: activeNotebook.partitionFilters ?? {},
       query: "",
+      startTime: activeNotebook.startTime,
+      endTime: activeNotebook.endTime,
       range: "Last 60 min",
       updatedAt: "Just now",
     };
@@ -1014,7 +1026,7 @@ export default function HomePage() {
   const prefixLabel =
     activeNotebook.rootPrefix.trim() === "" ? "/" : activeNotebook.rootPrefix;
   const hasCustomPattern = activeNotebook.customPathPattern.trim().length > 0;
-  const editablePartitions = [...partitionDefinitions]
+  const allEditablePartitions = [...partitionDefinitions]
     .sort((left, right) =>
       left.level === right.level
         ? left.order === right.order
@@ -1032,6 +1044,14 @@ export default function HomePage() {
         selectedValue: activeNotebook.partitionFilters?.[partition.key] ?? "",
       };
     });
+  const timeMappedPartitionKeys = new Set(
+    activeNotebook.timeConfig.pathMappings
+      .filter((mapping) => mapping.component !== "none")
+      .map((mapping) => mapping.partitionKey),
+  );
+  const editablePartitions = allEditablePartitions.filter(
+    (partition) => !timeMappedPartitionKeys.has(partition.key),
+  );
   const currentSearchState =
     searchStateByNotebook[activeNotebook.id] ?? createEmptySearchState();
   const currentTimePreview =
@@ -1131,6 +1151,11 @@ export default function HomePage() {
           nextMapping.component === "none" && !nextMapping.format
             ? filtered
             : [...filtered, nextMapping];
+        const nextFilters = { ...(notebook.partitionFilters ?? {}) };
+
+        if (nextMapping.component !== "none") {
+          delete nextFilters[partitionKey];
+        }
 
         return {
           ...notebook,
@@ -1138,6 +1163,7 @@ export default function HomePage() {
             ...notebook.timeConfig,
             pathMappings: nextMappings,
           },
+          partitionFilters: nextFilters,
           updatedAt: "Just now",
         };
       }),
@@ -1166,7 +1192,7 @@ export default function HomePage() {
       activeNotebook.timeConfig.pathMappings
         .filter((mapping) => mapping.component !== "none")
         .map((mapping) => {
-          const partition = editablePartitions.find(
+          const partition = allEditablePartitions.find(
             (entry) => entry.key === mapping.partitionKey,
           );
           const value =
@@ -1649,9 +1675,9 @@ export default function HomePage() {
                 {currentTimePreview.loading ? "Previewing..." : "Preview time config"}
               </button>
             </div>
-            {editablePartitions.length > 0 ? (
+            {allEditablePartitions.length > 0 ? (
               <div className="time-mapping-list">
-                {editablePartitions.map((partition) => {
+                {allEditablePartitions.map((partition) => {
                   const mapping = pathMappingsByKey[partition.key];
 
                   return (
@@ -1723,7 +1749,7 @@ export default function HomePage() {
                     });
                   }}
                 >
-                  <option value="none">None</option>
+                  <option value="none">Ignore line timestamps</option>
                   <option value="auto">Auto</option>
                   <option value="regex">Regex</option>
                 </select>
@@ -1848,6 +1874,30 @@ export default function HomePage() {
                 placeholder="Search for an exact substring"
                 onChange={(event) => updateActiveNotebook("query", event.target.value)}
               />
+            </div>
+            <div className="search-time-grid">
+              <div className="field">
+                <label htmlFor="search-start-time">Start time</label>
+                <input
+                  id="search-start-time"
+                  type="datetime-local"
+                  value={activeNotebook.startTime}
+                  onChange={(event) =>
+                    updateActiveNotebook("startTime", event.target.value)
+                  }
+                />
+              </div>
+              <div className="field">
+                <label htmlFor="search-end-time">End time</label>
+                <input
+                  id="search-end-time"
+                  type="datetime-local"
+                  value={activeNotebook.endTime}
+                  onChange={(event) =>
+                    updateActiveNotebook("endTime", event.target.value)
+                  }
+                />
+              </div>
             </div>
             <label className="search-option-toggle">
               <input
