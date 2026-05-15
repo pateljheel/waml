@@ -75,6 +75,42 @@ const binaryExtensions = new Set([
   ".xlsx",
   ".zip",
 ]);
+const textContentTypePrefixes = [
+  "text/",
+];
+const textContentTypes = new Set([
+  "application/json",
+  "application/ld+json",
+  "application/x-ndjson",
+  "application/xml",
+  "application/yaml",
+  "application/x-yaml",
+  "application/csv",
+  "application/javascript",
+  "application/x-javascript",
+  "application/sql",
+]);
+const binaryContentTypePrefixes = [
+  "image/",
+  "audio/",
+  "video/",
+  "font/",
+];
+const binaryContentTypes = new Set([
+  "application/octet-stream",
+  "application/pdf",
+  "application/zip",
+  "application/x-zip-compressed",
+  "application/gzip",
+  "application/x-gzip",
+  "application/x-7z-compressed",
+  "application/x-rar-compressed",
+  "application/vnd.ms-excel",
+  "application/vnd.openxmlformats-officedocument",
+  "application/msword",
+  "application/vnd.ms-powerpoint",
+  "application/java-archive",
+]);
 
 function sleep(durationMs: number) {
   return new Promise((resolve) => {
@@ -395,6 +431,44 @@ function isGzipObject(objectKey: string) {
   return objectKey.toLocaleLowerCase().endsWith(".gz");
 }
 
+function normalizeContentType(contentType?: string | null) {
+  if (!contentType) {
+    return null;
+  }
+
+  return contentType.split(";")[0]?.trim().toLocaleLowerCase() || null;
+}
+
+function shouldSkipObjectByContentType(contentType?: string | null) {
+  const normalized = normalizeContentType(contentType);
+
+  if (!normalized) {
+    return false;
+  }
+
+  if (textContentTypes.has(normalized)) {
+    return false;
+  }
+
+  for (const prefix of textContentTypePrefixes) {
+    if (normalized.startsWith(prefix)) {
+      return false;
+    }
+  }
+
+  if (binaryContentTypes.has(normalized)) {
+    return true;
+  }
+
+  for (const prefix of binaryContentTypePrefixes) {
+    if (normalized.startsWith(prefix)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 function looksBinaryBuffer(chunkBuffer: Buffer) {
   const sample = chunkBuffer.subarray(0, binarySniffBytes);
 
@@ -529,15 +603,27 @@ async function processObject({
   });
 
   const body = response.Body as AsyncIterable<Uint8Array | Buffer | string> | undefined;
+  const sourceStream =
+    body && typeof (body as NodeJS.ReadableStream).pipe === "function"
+      ? (body as Readable)
+      : body
+        ? Readable.from(body)
+        : undefined;
 
-  if (!body) {
+  if (!sourceStream) {
     return;
   }
 
-  const sourceStream: Readable =
-    typeof (body as NodeJS.ReadableStream).pipe === "function"
-      ? (body as Readable)
-      : Readable.from(body);
+  if (!gzipObject && shouldSkipObjectByContentType(response.ContentType)) {
+    sourceStream.destroy();
+    appendJobEvent(job.id, "object.skipped", {
+      objectKey,
+      reason: "binary_content_type",
+      contentType: response.ContentType ?? null,
+    });
+    return;
+  }
+
   const decodedBody: Readable = gzipObject
     ? sourceStream.pipe(createGunzip())
     : sourceStream;
