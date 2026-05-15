@@ -15,6 +15,12 @@ export type SearchJobStatus = z.infer<typeof searchJobStatusSchema>;
 
 export const DEFAULT_QUERY_MODE: QueryMode = "substring";
 
+export const searchOptionsSchema = z.object({
+  caseSensitive: z.boolean().default(false),
+});
+
+export type SearchOptions = z.infer<typeof searchOptionsSchema>;
+
 export const notebookSourceSchema = z.object({
   awsProfile: z.string().min(1),
   bucket: z.string().min(1),
@@ -46,6 +52,7 @@ export const searchJobSchema = z.object({
   notebookId: z.string().min(1),
   mode: queryModeSchema.default(DEFAULT_QUERY_MODE),
   pattern: z.string().min(1),
+  searchOptions: searchOptionsSchema.default({}),
   startTime: z.string().default(""),
   endTime: z.string().default(""),
   source: notebookSourceSchema,
@@ -86,6 +93,7 @@ export const searchJobEventTypeSchema = z.enum([
   "job.completed",
   "job.failed",
   "object.started",
+  "object.skipped",
   "chunk.started",
   "match.batch",
 ]);

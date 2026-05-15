@@ -22,6 +22,8 @@ import type { SearchJob, SearchMatch } from "@waml/shared";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { Readable } from "node:stream";
+import { createGunzip } from "node:zlib";
 
 type IniSectionMap = Record<string, Record<string, string>>;
 
@@ -31,6 +33,40 @@ const pollIntervalMs = 600;
 const progressIntervalMs = 500;
 const matchFlushIntervalMs = 250;
 const matchFlushSize = 50;
+const binarySniffBytes = 4096;
+const binaryExtensions = new Set([
+  ".7z",
+  ".avif",
+  ".bin",
+  ".bmp",
+  ".class",
+  ".dll",
+  ".dmg",
+  ".doc",
+  ".docx",
+  ".exe",
+  ".gif",
+  ".ico",
+  ".jar",
+  ".jpeg",
+  ".jpg",
+  ".mov",
+  ".mp3",
+  ".mp4",
+  ".pdf",
+  ".png",
+  ".ppt",
+  ".pptx",
+  ".pyc",
+  ".so",
+  ".tar",
+  ".tgz",
+  ".war",
+  ".webp",
+  ".xls",
+  ".xlsx",
+  ".zip",
+]);
 
 function sleep(durationMs: number) {
   return new Promise((resolve) => {
@@ -204,6 +240,63 @@ function extractTimestamp(lineText: string) {
   return match?.[1];
 }
 
+function shouldSkipObjectByKey(objectKey: string) {
+  const lowerKey = objectKey.toLocaleLowerCase();
+
+  for (const extension of binaryExtensions) {
+    if (lowerKey.endsWith(extension)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function isGzipObject(objectKey: string) {
+  return objectKey.toLocaleLowerCase().endsWith(".gz");
+}
+
+function looksBinaryBuffer(chunkBuffer: Buffer) {
+  const sample = chunkBuffer.subarray(0, binarySniffBytes);
+
+  if (sample.length === 0) {
+    return false;
+  }
+
+  let suspiciousBytes = 0;
+
+  for (const byte of sample) {
+    if (byte === 0) {
+      return true;
+    }
+
+    const isAllowedControl = byte === 9 || byte === 10 || byte === 13;
+    const isPrintableAscii = byte >= 32 && byte <= 126;
+    const isExtendedUtf8Byte = byte >= 128;
+
+    if (!isAllowedControl && !isPrintableAscii && !isExtendedUtf8Byte) {
+      suspiciousBytes += 1;
+    }
+  }
+
+  return suspiciousBytes / sample.length > 0.2;
+}
+
+function createSubstringMatcher(job: SearchJob) {
+  const caseSensitive = job.searchOptions.caseSensitive;
+  const normalizedPattern = caseSensitive
+    ? job.pattern
+    : job.pattern.toLocaleLowerCase();
+
+  return {
+    caseSensitive,
+    matches(lineText: string) {
+      const haystack = caseSensitive ? lineText : lineText.toLocaleLowerCase();
+      return haystack.includes(normalizedPattern);
+    },
+  };
+}
+
 async function flushProgress(jobId: string, progress: SearchJob["progress"]) {
   const job = updateJobProgress(jobId, progress);
 
@@ -244,6 +337,17 @@ async function processObject({
   lastProgressAt: { value: number };
   lastMatchAt: { value: number };
 }) {
+  const matcher = createSubstringMatcher(job);
+  const gzipObject = isGzipObject(objectKey);
+
+  if (!gzipObject && shouldSkipObjectByKey(objectKey)) {
+    appendJobEvent(job.id, "object.skipped", {
+      objectKey,
+      reason: "binary_extension",
+    });
+    return;
+  }
+
   const controller = new AbortController();
   const response = await client.send(
     new GetObjectCommand({
@@ -261,6 +365,14 @@ async function processObject({
     return;
   }
 
+  const sourceStream: Readable =
+    typeof (body as NodeJS.ReadableStream).pipe === "function"
+      ? (body as Readable)
+      : Readable.from(body);
+  const decodedBody: Readable = gzipObject
+    ? sourceStream.pipe(createGunzip())
+    : sourceStream;
+
   appendJobEvent(job.id, "object.started", { objectKey });
   appendJobEvent(job.id, "chunk.started", { objectKey, chunkId: "0" });
 
@@ -270,15 +382,30 @@ async function processObject({
   const decoder = new TextDecoder("utf-8");
   let bufferedText = "";
   let lineNumber = 0;
+  let inspectedFirstChunk = false;
 
-  for await (const rawChunk of body) {
+  for await (const rawChunk of decodedBody) {
     if (isJobCancellationRequested(job.id)) {
       controller.abort();
+      decodedBody.destroy();
       throw new Error("JOB_CANCELLED");
     }
 
     const chunkBuffer =
       typeof rawChunk === "string" ? Buffer.from(rawChunk) : Buffer.from(rawChunk);
+
+    if (!inspectedFirstChunk) {
+      inspectedFirstChunk = true;
+
+      if (looksBinaryBuffer(chunkBuffer)) {
+        controller.abort();
+        appendJobEvent(job.id, "object.skipped", {
+          objectKey,
+          reason: "binary_sniff",
+        });
+        return;
+      }
+    }
 
     progress.bytesScanned += chunkBuffer.byteLength;
     bufferedText += decoder.decode(chunkBuffer, { stream: true });
@@ -289,7 +416,7 @@ async function processObject({
     for (const lineText of lines) {
       lineNumber += 1;
 
-      if (!lineText.includes(job.pattern)) {
+      if (!matcher.matches(lineText)) {
         continue;
       }
 
@@ -323,7 +450,7 @@ async function processObject({
   if (bufferedText) {
     lineNumber += 1;
 
-    if (bufferedText.includes(job.pattern)) {
+    if (matcher.matches(bufferedText)) {
       pendingMatches.push({
         objectKey,
         lineNumber,

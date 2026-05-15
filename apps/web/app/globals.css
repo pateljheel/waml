@@ -421,6 +421,19 @@ select:focus {
   grid-column: 1 / -1;
 }
 
+.search-option-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted-2);
+  font-size: 0.82rem;
+}
+
+.search-option-toggle input {
+  width: auto;
+  min-height: auto;
+}
+
 .search-summary {
   flex-wrap: wrap;
   justify-content: flex-start;

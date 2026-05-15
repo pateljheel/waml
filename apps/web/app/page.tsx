@@ -11,6 +11,9 @@ type Notebook = {
   bucket: string;
   rootPrefix: string;
   customPathPattern: string;
+  searchOptions: {
+    caseSensitive: boolean;
+  };
   partitionOverrides: Record<
     string,
     {
@@ -57,6 +60,9 @@ const initialNotebooks: Notebook[] = [
     bucket: "company-prod-logs",
     rootPrefix: "apps/checkout/prod/",
     customPathPattern: "",
+    searchOptions: {
+      caseSensitive: false,
+    },
     partitionOverrides: {},
     partitionFilters: {},
     query: 'timeout while awaiting headers service="checkout-api"',
@@ -71,6 +77,9 @@ const initialNotebooks: Notebook[] = [
     bucket: "company-prod-logs",
     rootPrefix: "apps/auth/prod/",
     customPathPattern: "",
+    searchOptions: {
+      caseSensitive: false,
+    },
     partitionOverrides: {},
     partitionFilters: {},
     query: 'token refresh failed service="auth-service"',
@@ -85,6 +94,9 @@ const initialNotebooks: Notebook[] = [
     bucket: "company-stage-logs",
     rootPrefix: "workers/ingest/staging/",
     customPathPattern: "",
+    searchOptions: {
+      caseSensitive: false,
+    },
     partitionOverrides: {},
     partitionFilters: {},
     query: 'consumer lag service="worker-ingest"',
@@ -161,6 +173,9 @@ function normalizeNotebook(notebook: Partial<Notebook> & Pick<Notebook, "id" | "
     bucket: "",
     rootPrefix: "",
     customPathPattern: "",
+    searchOptions: {
+      caseSensitive: false,
+    },
     partitionOverrides: {},
     partitionFilters: {},
     query: "",
@@ -172,6 +187,9 @@ function normalizeNotebook(notebook: Partial<Notebook> & Pick<Notebook, "id" | "
   return {
     ...normalizedNotebook,
     customPathPattern: normalizedNotebook.customPathPattern ?? "",
+    searchOptions: normalizedNotebook.searchOptions ?? {
+      caseSensitive: false,
+    },
     partitionOverrides: normalizedNotebook.partitionOverrides ?? {},
     partitionFilters: normalizedNotebook.partitionFilters ?? {},
   } satisfies Notebook;
@@ -444,6 +462,7 @@ export default function HomePage() {
           bucket: activeNotebook.bucket,
           rootPrefix: activeNotebook.rootPrefix,
         },
+        searchOptions: activeNotebook.searchOptions,
         prefixFilters: activeNotebook.partitionFilters,
         customPathPattern: activeNotebook.customPathPattern,
       }),
@@ -513,6 +532,7 @@ export default function HomePage() {
       bucket: activeNotebook.bucket,
       rootPrefix: activeNotebook.rootPrefix,
       customPathPattern: activeNotebook.customPathPattern,
+      searchOptions: activeNotebook.searchOptions,
       partitionOverrides: activeNotebook.partitionOverrides ?? {},
       partitionFilters: activeNotebook.partitionFilters ?? {},
       query: "",
@@ -1454,6 +1474,19 @@ export default function HomePage() {
                 onChange={(event) => updateActiveNotebook("query", event.target.value)}
               />
             </div>
+            <label className="search-option-toggle">
+              <input
+                type="checkbox"
+                checked={activeNotebook.searchOptions.caseSensitive}
+                onChange={(event) =>
+                  updateActiveNotebook("searchOptions", {
+                    ...activeNotebook.searchOptions,
+                    caseSensitive: event.target.checked,
+                  })
+                }
+              />
+              <span>Case-sensitive</span>
+            </label>
             <div className="search-summary">
               <span className={`search-status status-${currentSearchState.status}`}>
                 {searchStatusLabel(currentSearchState.status)}
