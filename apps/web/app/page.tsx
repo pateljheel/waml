@@ -5,6 +5,7 @@ import type {
   PrefixFilterSelection,
   NotebookTimeConfig,
   PrefixFilters,
+  QueryMode,
   SearchJob,
   SearchJobStatus,
   SearchMatch,
@@ -17,6 +18,7 @@ type Notebook = {
   id: string;
   title: string;
   status: "running" | "idle";
+  queryMode: QueryMode;
   awsProfile: string;
   bucket: string;
   rootPrefix: string;
@@ -104,6 +106,7 @@ const initialNotebooks: Notebook[] = [
     id: "checkout-errors",
     title: "Checkout errors",
     status: "running",
+    queryMode: "substring",
     awsProfile: "prod-observability",
     bucket: "company-prod-logs",
     rootPrefix: "apps/checkout/prod/",
@@ -125,6 +128,7 @@ const initialNotebooks: Notebook[] = [
     id: "auth-refresh",
     title: "Auth refresh",
     status: "idle",
+    queryMode: "substring",
     awsProfile: "prod-observability",
     bucket: "company-prod-logs",
     rootPrefix: "apps/auth/prod/",
@@ -146,6 +150,7 @@ const initialNotebooks: Notebook[] = [
     id: "queue-latency",
     title: "Queue latency",
     status: "idle",
+    queryMode: "substring",
     awsProfile: "stage-observability",
     bucket: "company-stage-logs",
     rootPrefix: "workers/ingest/staging/",
@@ -247,6 +252,7 @@ function normalizeNotebook(notebook: Partial<Notebook> & Pick<Notebook, "id" | "
   const normalizedNotebook = {
     status: "idle" as Notebook["status"],
     awsProfile: "",
+    queryMode: "substring" as QueryMode,
     bucket: "",
     rootPrefix: "",
     customPathPattern: "",
@@ -674,7 +680,7 @@ export default function HomePage() {
       },
       body: JSON.stringify({
         notebookId: activeNotebook.id,
-        mode: "substring",
+        mode: activeNotebook.queryMode,
         pattern,
         startTime: activeNotebook.startTime,
         endTime: activeNotebook.endTime,
@@ -757,6 +763,7 @@ export default function HomePage() {
       id: crypto.randomUUID(),
       title: `Notebook ${notebooks.length + 1}`,
       status: "idle",
+      queryMode: activeNotebook.queryMode,
       awsProfile: activeNotebook.awsProfile,
       bucket: activeNotebook.bucket,
       rootPrefix: activeNotebook.rootPrefix,
@@ -2520,7 +2527,9 @@ export default function HomePage() {
               <div>
                 <label htmlFor="search-pattern">Search</label>
                 <p className="field-state">
-                  Exact substring match over objects under the selected root.
+                  {activeNotebook.queryMode === "substring"
+                    ? "Exact substring match over objects under the selected root."
+                    : "All tokens must appear in a line, in any order."}
                 </p>
               </div>
               <div className="search-actions">
@@ -2543,12 +2552,31 @@ export default function HomePage() {
               </div>
             </div>
             <div className="field search-pattern-field">
-              <input
-                id="search-pattern"
-                value={activeNotebook.query}
-                placeholder="Search for an exact substring"
-                onChange={(event) => updateActiveNotebook("query", event.target.value)}
-              />
+              <div className="search-query-row">
+                <select
+                  className="control search-mode-select"
+                  aria-label="Search mode"
+                  value={activeNotebook.queryMode}
+                  onChange={(event) =>
+                    updateActiveNotebook("queryMode", event.target.value as QueryMode)
+                  }
+                >
+                  <option value="substring">Substring</option>
+                  <option value="all_tokens">All tokens</option>
+                </select>
+                <input
+                  id="search-pattern"
+                  value={activeNotebook.query}
+                  placeholder={
+                    activeNotebook.queryMode === "substring"
+                      ? "Search for an exact substring"
+                      : "Enter tokens separated by spaces"
+                  }
+                  onChange={(event) =>
+                    updateActiveNotebook("query", event.target.value)
+                  }
+                />
+              </div>
             </div>
             <div className="search-time-grid">
               <div className="field">

@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const queryModeSchema = z.enum(["substring"]);
+export const queryModeSchema = z.enum(["substring", "all_tokens"]);
 export type QueryMode = z.infer<typeof queryModeSchema>;
 
 export const searchJobStatusSchema = z.enum([

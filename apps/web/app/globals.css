@@ -524,6 +524,16 @@ select:focus {
   grid-column: 1 / -1;
 }
 
+.search-query-row {
+  display: grid;
+  grid-template-columns: 160px minmax(0, 1fr);
+  gap: 10px;
+}
+
+.search-mode-select {
+  min-width: 0;
+}
+
 .search-time-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

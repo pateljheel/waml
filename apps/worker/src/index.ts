@@ -307,11 +307,23 @@ function createSubstringMatcher(job: SearchJob) {
   const normalizedPattern = caseSensitive
     ? job.pattern
     : job.pattern.toLocaleLowerCase();
+  const normalizedTokens =
+    job.mode === "all_tokens"
+      ? normalizedPattern
+          .split(/\s+/)
+          .map((token) => token.trim())
+          .filter(Boolean)
+      : [];
 
   return {
     caseSensitive,
     matches(lineText: string) {
       const haystack = caseSensitive ? lineText : lineText.toLocaleLowerCase();
+
+      if (job.mode === "all_tokens") {
+        return normalizedTokens.every((token) => haystack.includes(token));
+      }
+
       return haystack.includes(normalizedPattern);
     },
   };
