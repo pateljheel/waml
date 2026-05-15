@@ -853,3 +853,46 @@ export function deleteCacheChunksForObject(
   ).run(bucket, objectKey, etag);
   return existing;
 }
+
+export function listCacheChunksBySourcePrefix(bucket: string, rootPrefix: string) {
+  const db = initializeDatabase();
+  const normalizedPrefix = rootPrefix.trim();
+  const rows = normalizedPrefix
+    ? (db
+        .prepare(
+          `SELECT * FROM chunks
+           WHERE bucket = ? AND object_key LIKE ?
+           ORDER BY last_accessed_at ASC, created_at ASC`,
+        )
+        .all(bucket, `${normalizedPrefix}%`) as ChunkRow[])
+    : (db
+        .prepare(
+          `SELECT * FROM chunks
+           WHERE bucket = ?
+           ORDER BY last_accessed_at ASC, created_at ASC`,
+        )
+        .all(bucket) as ChunkRow[]);
+
+  return rows.map(mapChunkRow);
+}
+
+export function deleteCacheChunksBySourcePrefix(bucket: string, rootPrefix: string) {
+  const existing = listCacheChunksBySourcePrefix(bucket, rootPrefix);
+
+  if (existing.length === 0) {
+    return [];
+  }
+
+  const db = initializeDatabase();
+  const normalizedPrefix = rootPrefix.trim();
+
+  if (normalizedPrefix) {
+    db.prepare(
+      "DELETE FROM chunks WHERE bucket = ? AND object_key LIKE ?",
+    ).run(bucket, `${normalizedPrefix}%`);
+  } else {
+    db.prepare("DELETE FROM chunks WHERE bucket = ?").run(bucket);
+  }
+
+  return existing;
+}

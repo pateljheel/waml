@@ -101,6 +101,12 @@ type PartitionValuePickerState = {
   error: string | null;
 };
 
+type CacheInvalidateState = {
+  loading: boolean;
+  message: string | null;
+  error: string | null;
+};
+
 const initialNotebooks: Notebook[] = [
   {
     id: "checkout-errors",
@@ -333,6 +339,9 @@ export default function HomePage() {
   const [partitionPickerState, setPartitionPickerState] = useState<
     Record<string, PartitionValuePickerState>
   >({});
+  const [cacheInvalidateByNotebook, setCacheInvalidateByNotebook] = useState<
+    Record<string, CacheInvalidateState>
+  >({});
 
   const activeNotebook =
     notebooks.find((notebook) => notebook.id === activeNotebookId) ?? notebooks[0];
@@ -517,6 +526,28 @@ export default function HomePage() {
       return {
         ...current,
         [key]: nextValue,
+      };
+    });
+  }
+
+  function setCacheInvalidateState(
+    notebookId: string,
+    updater:
+      | CacheInvalidateState
+      | ((current: CacheInvalidateState) => CacheInvalidateState),
+  ) {
+    setCacheInvalidateByNotebook((current) => {
+      const existing = current[notebookId] ?? {
+        loading: false,
+        message: null,
+        error: null,
+      };
+      const nextValue =
+        typeof updater === "function" ? updater(existing) : updater;
+
+      return {
+        ...current,
+        [notebookId]: nextValue,
       };
     });
   }
@@ -756,6 +787,65 @@ export default function HomePage() {
       ...current,
       status: payload.job?.status ?? current.status,
     }));
+  }
+
+  async function invalidateCache() {
+    if (
+      !activeNotebook.bucket.trim() ||
+      !window.confirm(
+        `Invalidate cached search artifacts for s3://${activeNotebook.bucket}/${activeNotebook.rootPrefix}?`,
+      )
+    ) {
+      return;
+    }
+
+    setCacheInvalidateState(activeNotebook.id, {
+      loading: true,
+      message: null,
+      error: null,
+    });
+
+    const response = await fetch("/api/cache/invalidate", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        bucket: activeNotebook.bucket,
+        rootPrefix: activeNotebook.rootPrefix,
+      }),
+    });
+
+    const payload = (await response.json()) as {
+      removedChunks?: number;
+      removedBytes?: number;
+      error?: string;
+    };
+
+    if (!response.ok) {
+      setCacheInvalidateState(activeNotebook.id, {
+        loading: false,
+        message: null,
+        error: payload.error ?? "Failed to invalidate cache",
+      });
+      return;
+    }
+
+    setSearchState(activeNotebook.id, (current) => ({
+      ...current,
+      cache: {
+        hits: 0,
+        misses: 0,
+        writes: 0,
+        evictions: 0,
+        recentEvents: [],
+      },
+    }));
+    setCacheInvalidateState(activeNotebook.id, {
+      loading: false,
+      message: `Removed ${payload.removedChunks ?? 0} chunks and ${payload.removedBytes ?? 0} bytes of cached artifacts.`,
+      error: null,
+    });
   }
 
   function createNotebook() {
@@ -1303,6 +1393,12 @@ export default function HomePage() {
   );
   const currentSearchState =
     searchStateByNotebook[activeNotebook.id] ?? createEmptySearchState();
+  const currentCacheInvalidateState =
+    cacheInvalidateByNotebook[activeNotebook.id] ?? {
+      loading: false,
+      message: null,
+      error: null,
+    };
   const currentTimePreview =
     timePreviewByNotebook[activeNotebook.id] ?? {
       loading: false,
@@ -1336,6 +1432,12 @@ export default function HomePage() {
     (currentSearchState.status === "queued" ||
       currentSearchState.status === "running" ||
       currentSearchState.status === "cancelling");
+  const canInvalidateCache =
+    activeNotebook.bucket.trim().length > 0 &&
+    currentSearchState.status !== "queued" &&
+    currentSearchState.status !== "running" &&
+    currentSearchState.status !== "cancelling" &&
+    !currentCacheInvalidateState.loading;
 
   function clearPartitionFilter(key: string) {
     setNotebooks((currentNotebooks) =>
@@ -2631,9 +2733,27 @@ export default function HomePage() {
               <span>
                 {currentSearchState.connected ? "Live stream connected" : "Stream idle"}
               </span>
+              <button
+                type="button"
+                className="secondary-button search-cache-action"
+                onClick={invalidateCache}
+                disabled={!canInvalidateCache}
+              >
+                {currentCacheInvalidateState.loading
+                  ? "Invalidating cache..."
+                  : "Invalidate cache"}
+              </button>
             </div>
             {currentSearchState.errorMessage ? (
               <p className="field-error">{currentSearchState.errorMessage}</p>
+            ) : null}
+            {currentCacheInvalidateState.error ? (
+              <p className="field-error">{currentCacheInvalidateState.error}</p>
+            ) : null}
+            {currentCacheInvalidateState.message ? (
+              <p className="field-state cache-invalidate-message">
+                {currentCacheInvalidateState.message}
+              </p>
             ) : null}
             {currentSearchState.cache.recentEvents.length > 0 ? (
               <div className="search-cache-activity">

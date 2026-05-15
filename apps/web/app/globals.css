@@ -560,6 +560,15 @@ select:focus {
   font-size: 0.76rem;
 }
 
+.search-cache-action {
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+.cache-invalidate-message {
+  margin-top: -2px;
+}
+
 .search-status {
   color: var(--muted-2);
   font-weight: 600;
