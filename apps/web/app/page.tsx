@@ -39,6 +39,7 @@ type Notebook = {
   partitionFilters: PrefixFilters;
   query: string;
   pageSize: number;
+  contextLineCount: number;
   startTime: string;
   endTime: string;
   range: string;
@@ -146,6 +147,7 @@ const initialNotebooks: Notebook[] = [
     partitionFilters: {},
     query: 'timeout while awaiting headers service="checkout-api"',
     pageSize: 100,
+    contextLineCount: 20,
     startTime: "",
     endTime: "",
     range: "Last 90 min",
@@ -169,6 +171,7 @@ const initialNotebooks: Notebook[] = [
     partitionFilters: {},
     query: 'token refresh failed service="auth-service"',
     pageSize: 100,
+    contextLineCount: 20,
     startTime: "",
     endTime: "",
     range: "Today",
@@ -192,6 +195,7 @@ const initialNotebooks: Notebook[] = [
     partitionFilters: {},
     query: 'consumer lag service="worker-ingest"',
     pageSize: 100,
+    contextLineCount: 20,
     startTime: "",
     endTime: "",
     range: "May 2026",
@@ -301,6 +305,7 @@ function normalizeNotebook(notebook: Partial<Notebook> & Pick<Notebook, "id" | "
     partitionFilters: {},
     query: "",
     pageSize: 100,
+    contextLineCount: 20,
     startTime: "",
     endTime: "",
     range: "",
@@ -318,6 +323,7 @@ function normalizeNotebook(notebook: Partial<Notebook> & Pick<Notebook, "id" | "
     timeSampleLine: normalizedNotebook.timeSampleLine ?? "",
     partitionOverrides: normalizedNotebook.partitionOverrides ?? {},
     partitionFilters: normalizePrefixFilters(normalizedNotebook.partitionFilters),
+    contextLineCount: normalizedNotebook.contextLineCount ?? 20,
   } satisfies Notebook;
 }
 
@@ -765,7 +771,7 @@ export default function HomePage() {
         result.objectKey,
       )}&etag=${encodeURIComponent(result.etag ?? "")}&lineNumber=${
         result.lineNumber
-      }&before=20&after=20`,
+      }&before=${activeNotebook.contextLineCount}&after=${activeNotebook.contextLineCount}`,
       {
         cache: "no-store",
       },
@@ -1139,6 +1145,7 @@ export default function HomePage() {
       partitionFilters: clonePrefixFilters(activeNotebook.partitionFilters ?? {}),
       query: "",
       pageSize: activeNotebook.pageSize,
+      contextLineCount: activeNotebook.contextLineCount,
       startTime: activeNotebook.startTime,
       endTime: activeNotebook.endTime,
       range: "Last 60 min",
@@ -3005,6 +3012,25 @@ export default function HomePage() {
                   <option value={50}>50</option>
                   <option value={100}>100</option>
                   <option value={250}>250</option>
+                </select>
+              </div>
+              <div className="field">
+                <label htmlFor="search-context-lines">Context lines</label>
+                <select
+                  id="search-context-lines"
+                  className="control"
+                  value={activeNotebook.contextLineCount}
+                  onChange={(event) =>
+                    updateActiveNotebook(
+                      "contextLineCount",
+                      Number(event.target.value),
+                    )
+                  }
+                >
+                  <option value={10}>10</option>
+                  <option value={20}>20</option>
+                  <option value={50}>50</option>
+                  <option value={100}>100</option>
                 </select>
               </div>
             </div>
