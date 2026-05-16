@@ -699,12 +699,64 @@ select:focus {
   font-size: 0.69rem;
 }
 
+.search-result-context-button {
+  margin-left: auto;
+}
+
 .search-result-line {
   white-space: pre-wrap;
   word-break: break-word;
   color: var(--text);
   font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
   font-size: 0.73rem;
+}
+
+.search-result-context {
+  display: grid;
+  gap: 4px;
+  margin-top: 4px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: rgba(15, 23, 42, 0.02);
+}
+
+.search-result-context-meta {
+  color: var(--muted);
+  font-size: 0.68rem;
+}
+
+.search-context-object-boundary {
+  margin: 4px 0 3px;
+  color: var(--muted);
+  font-size: 0.66rem;
+  font-weight: 600;
+}
+
+.search-context-line {
+  display: grid;
+  grid-template-columns: 56px minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+  color: var(--muted-2);
+  font-size: 0.71rem;
+}
+
+.search-context-line.is-match {
+  color: var(--text);
+}
+
+.search-context-line-number {
+  color: var(--muted);
+  font-size: 0.68rem;
+  text-align: right;
+}
+
+.search-context-line-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-size: 0.72rem;
 }
 
 .pager-row {

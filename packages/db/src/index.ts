@@ -199,6 +199,7 @@ export function initializeDatabase() {
       job_id TEXT NOT NULL,
       sequence_no INTEGER NOT NULL,
       object_key TEXT NOT NULL,
+      etag TEXT NOT NULL DEFAULT '',
       line_number INTEGER NOT NULL,
       timestamp_text TEXT,
       line_text TEXT NOT NULL,
@@ -322,6 +323,12 @@ export function initializeDatabase() {
   );
   ensureColumn(db, "chunks", "min_timestamp_ms", "min_timestamp_ms INTEGER");
   ensureColumn(db, "chunks", "max_timestamp_ms", "max_timestamp_ms INTEGER");
+  ensureColumn(
+    db,
+    "job_results",
+    "etag",
+    "etag TEXT NOT NULL DEFAULT ''",
+  );
 
   return db;
 }
@@ -616,8 +623,8 @@ export function appendJobResults(jobId: string, matches: SearchMatch[]) {
 
   const insert = db.prepare(
     `INSERT INTO job_results (
-      job_id, sequence_no, object_key, line_number, timestamp_text, line_text, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      job_id, sequence_no, object_key, etag, line_number, timestamp_text, line_text, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
   );
 
   for (const match of matches) {
@@ -626,6 +633,7 @@ export function appendJobResults(jobId: string, matches: SearchMatch[]) {
       jobId,
       sequenceNo,
       match.objectKey,
+      match.etag ?? "",
       match.lineNumber,
       match.timestampText ?? null,
       match.lineText,
@@ -653,6 +661,7 @@ export function listJobResultsPage(jobId: string, page: number, pageSize: number
   const rows = db
     .prepare(
       `SELECT object_key, line_number, timestamp_text, line_text
+       , etag
        FROM job_results
        WHERE job_id = ?
        ORDER BY sequence_no ASC
@@ -660,6 +669,7 @@ export function listJobResultsPage(jobId: string, page: number, pageSize: number
     )
     .all(jobId, safePageSize, offset) as Array<{
       object_key: string;
+      etag: string;
       line_number: number;
       timestamp_text: string | null;
       line_text: string;
@@ -667,6 +677,7 @@ export function listJobResultsPage(jobId: string, page: number, pageSize: number
 
   return rows.map((row) => ({
     objectKey: row.object_key,
+    etag: row.etag || undefined,
     lineNumber: row.line_number,
     timestampText: row.timestamp_text ?? undefined,
     lineText: row.line_text,

@@ -105,7 +105,7 @@ function getProfileRegion(profile: string, configSections: IniSectionMap) {
   );
 }
 
-async function createS3Client(profile: string) {
+export async function createS3Client(profile: string) {
   const configContent = await readIfPresent(configPath);
   const configSections = parseIniSections(configContent);
   const region = getProfileRegion(profile, configSections);

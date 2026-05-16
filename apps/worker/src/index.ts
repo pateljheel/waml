@@ -81,6 +81,7 @@ async function scanCachedTextFile({
   filepath,
   job,
   objectKey,
+  etag,
   progress,
   pendingMatches,
   lastProgressAt,
@@ -91,6 +92,7 @@ async function scanCachedTextFile({
   filepath: string;
   job: SearchJob;
   objectKey: string;
+  etag: string;
   progress: SearchJob["progress"];
   pendingMatches: SearchMatch[];
   lastProgressAt: { value: number };
@@ -142,6 +144,7 @@ async function scanCachedTextFile({
 
     pendingMatches.push({
       objectKey,
+      etag,
       lineNumber,
       lineText,
       timestampText: timestampResult.lineTimestamp ?? undefined,
@@ -454,6 +457,7 @@ async function processObject({
         filepath: cachedChunk.textCachePath!,
         job,
         objectKey,
+        etag,
         progress,
         pendingMatches,
         lastProgressAt,
@@ -673,6 +677,7 @@ async function processObject({
 
         pendingMatches.push({
           objectKey,
+          etag,
           lineNumber,
           lineText,
           timestampText: timestampResult.lineTimestamp ?? undefined,
@@ -741,6 +746,7 @@ async function processObject({
         ) {
           pendingMatches.push({
             objectKey,
+            etag,
             lineNumber,
             lineText: bufferedText,
             timestampText: timestampResult.lineTimestamp ?? undefined,

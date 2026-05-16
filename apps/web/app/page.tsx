@@ -82,6 +82,21 @@ type NotebookSearchState = {
   };
   errorMessage: string | null;
   connected: boolean;
+  contextByResultKey: Record<
+    string,
+    {
+      loading: boolean;
+      error: string | null;
+      lines: Array<{
+        objectKey: string;
+        lineNumber: number;
+        lineText: string;
+        isMatch: boolean;
+      }>;
+      open: boolean;
+      source: "cache" | "s3" | null;
+    }
+  >;
 };
 
 type TimePreviewState = {
@@ -241,6 +256,7 @@ function createEmptySearchState(): NotebookSearchState {
     },
     errorMessage: null,
     connected: false,
+    contextByResultKey: {},
   };
 }
 
@@ -688,6 +704,115 @@ export default function HomePage() {
     );
   }
 
+  function getResultContextKey(result: SearchMatch) {
+    return `${result.objectKey}:${result.etag ?? ""}:${result.lineNumber}`;
+  }
+
+  async function toggleResultContext(result: SearchMatch) {
+    const currentSearch = searchStateByNotebook[activeNotebook.id];
+
+    if (!currentSearch?.jobId) {
+      return;
+    }
+
+    const contextKey = getResultContextKey(result);
+    const existing = currentSearch.contextByResultKey[contextKey];
+
+    if (existing && existing.open) {
+      setSearchState(activeNotebook.id, (current) => ({
+        ...current,
+        contextByResultKey: {
+          ...current.contextByResultKey,
+          [contextKey]: {
+            ...existing,
+            open: false,
+          },
+        },
+      }));
+      return;
+    }
+
+    if (existing && existing.lines.length > 0) {
+      setSearchState(activeNotebook.id, (current) => ({
+        ...current,
+        contextByResultKey: {
+          ...current.contextByResultKey,
+          [contextKey]: {
+            ...existing,
+            open: true,
+          },
+        },
+      }));
+      return;
+    }
+
+    setSearchState(activeNotebook.id, (current) => ({
+      ...current,
+      contextByResultKey: {
+        ...current.contextByResultKey,
+        [contextKey]: {
+          loading: true,
+          error: null,
+          lines: [],
+          open: true,
+          source: null,
+        },
+      },
+    }));
+
+    const response = await fetch(
+      `/api/search/${currentSearch.jobId}/context?objectKey=${encodeURIComponent(
+        result.objectKey,
+      )}&etag=${encodeURIComponent(result.etag ?? "")}&lineNumber=${
+        result.lineNumber
+      }&before=20&after=20`,
+      {
+        cache: "no-store",
+      },
+    );
+    const payload = (await response.json()) as {
+      lines?: Array<{
+        objectKey: string;
+        lineNumber: number;
+        lineText: string;
+        isMatch: boolean;
+      }>;
+      source?: "cache" | "s3";
+      error?: string;
+    };
+
+    if (!response.ok) {
+      setSearchState(activeNotebook.id, (current) => ({
+        ...current,
+        contextByResultKey: {
+          ...current.contextByResultKey,
+          [contextKey]: {
+            loading: false,
+            error: payload.error ?? "Failed to load context",
+            lines: [],
+            open: true,
+            source: null,
+          },
+        },
+      }));
+      return;
+    }
+
+    setSearchState(activeNotebook.id, (current) => ({
+      ...current,
+      contextByResultKey: {
+        ...current.contextByResultKey,
+        [contextKey]: {
+          loading: false,
+          error: null,
+          lines: payload.lines ?? [],
+          open: true,
+          source: payload.source ?? null,
+        },
+      },
+    }));
+  }
+
   function openSearchStream(notebookId: string, jobId: string) {
     closeSearchStream(notebookId);
     const source = new EventSource(`/api/search/${jobId}/events`);
@@ -894,6 +1019,7 @@ export default function HomePage() {
       totalResults: 0,
       loadingPage: false,
       results: [],
+      contextByResultKey: {},
       cache: {
         hits: 0,
         misses: 0,
@@ -2991,19 +3117,71 @@ export default function HomePage() {
                     : "No matches yet."}
                 </div>
               ) : (
-                currentSearchState.results.map((result, index) => (
-                  <div
-                    key={`${result.objectKey}:${result.lineNumber}:${index}`}
-                    className="search-result-row"
-                  >
-                    <div className="search-result-meta">
-                      <span>{result.objectKey}</span>
-                      <span>line {result.lineNumber}</span>
-                      {result.timestampText ? <span>{result.timestampText}</span> : null}
+                currentSearchState.results.map((result, index) => {
+                  const contextKey = getResultContextKey(result);
+                  const contextState =
+                    currentSearchState.contextByResultKey[contextKey];
+
+                  return (
+                    <div
+                      key={`${result.objectKey}:${result.lineNumber}:${index}`}
+                      className="search-result-row"
+                    >
+                      <div className="search-result-meta">
+                        <span>{result.objectKey}</span>
+                        <span>line {result.lineNumber}</span>
+                        {result.timestampText ? <span>{result.timestampText}</span> : null}
+                        <button
+                          type="button"
+                          className="secondary-button search-result-context-button"
+                          onClick={() => toggleResultContext(result)}
+                        >
+                          {contextState?.loading
+                            ? "Loading context..."
+                            : contextState?.open
+                              ? "Hide context"
+                              : "Show context"}
+                        </button>
+                      </div>
+                      <code className="search-result-line">{result.lineText}</code>
+                      {contextState?.open ? (
+                        <div className="search-result-context">
+                          {contextState.source ? (
+                            <div className="search-result-context-meta">
+                              Context source: {contextState.source}
+                            </div>
+                          ) : null}
+                          {contextState.error ? (
+                            <p className="field-error">{contextState.error}</p>
+                          ) : null}
+                          {contextState.lines.map((line, lineIndex) => (
+                            <div key={`${contextKey}:${line.objectKey}:${line.lineNumber}`}>
+                              {lineIndex === 0 ||
+                              contextState.lines[lineIndex - 1]?.objectKey !==
+                                line.objectKey ? (
+                                <div className="search-context-object-boundary">
+                                  {line.objectKey}
+                                </div>
+                              ) : null}
+                              <div
+                                className={`search-context-line${
+                                  line.isMatch ? " is-match" : ""
+                                }`}
+                              >
+                                <span className="search-context-line-number">
+                                  {line.lineNumber}
+                                </span>
+                                <code className="search-context-line-text">
+                                  {line.lineText}
+                                </code>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      ) : null}
                     </div>
-                    <code className="search-result-line">{result.lineText}</code>
-                  </div>
-                ))
+                  );
+                })
               )}
             </div>
           </div>
