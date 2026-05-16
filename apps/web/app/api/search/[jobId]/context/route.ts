@@ -66,6 +66,54 @@ async function loadContextFromCache({
 
   const startLine = Math.max(1, lineNumber - before);
   const endLine = lineNumber + after;
+  const canUseLineRanges = chunks.every(
+    (chunk) =>
+      chunk.textCachePath &&
+      chunk.startLineNumber !== null &&
+      chunk.endLineNumber !== null,
+  );
+
+  if (canUseLineRanges) {
+    const collected: ContextLine[] = [];
+
+    for (const chunk of chunks) {
+      if (!chunk.textCachePath) {
+        return null;
+      }
+
+      if (
+        chunk.endLineNumber! < startLine ||
+        chunk.startLineNumber! > endLine
+      ) {
+        continue;
+      }
+
+      const text = await readCachedTextArtifact(chunk.textCachePath);
+      const lines = normalizeChunkLines(text);
+      const localStartIndex = Math.max(0, startLine - chunk.startLineNumber!);
+      const localEndIndex = Math.min(
+        lines.length - 1,
+        endLine - chunk.startLineNumber!,
+      );
+
+      for (
+        let localIndex = localStartIndex;
+        localIndex <= localEndIndex;
+        localIndex += 1
+      ) {
+        const absoluteLineNumber = chunk.startLineNumber! + localIndex;
+        collected.push({
+          objectKey,
+          lineNumber: absoluteLineNumber,
+          lineText: lines[localIndex] ?? "",
+          isMatch: absoluteLineNumber === lineNumber,
+        });
+      }
+    }
+
+    return collected.length > 0 ? collected : null;
+  }
+
   const collected: ContextLine[] = [];
   let currentLineNumber = 0;
 

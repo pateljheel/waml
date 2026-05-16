@@ -83,6 +83,8 @@ type ChunkRow = {
   chunk_id: string;
   byte_start: number;
   byte_end: number;
+  start_line_number: number | null;
+  end_line_number: number | null;
   artifact_path: string;
   text_cache_path: string | null;
   cache_size_bytes: number;
@@ -122,6 +124,8 @@ export type CacheChunkRecord = {
   chunkId: string;
   byteStart: number;
   byteEnd: number;
+  startLineNumber: number | null;
+  endLineNumber: number | null;
   artifactPath: string;
   textCachePath: string | null;
   cacheSizeBytes: number;
@@ -300,6 +304,8 @@ export function initializeDatabase() {
       chunk_id TEXT NOT NULL,
       byte_start INTEGER NOT NULL,
       byte_end INTEGER NOT NULL,
+      start_line_number INTEGER,
+      end_line_number INTEGER,
       artifact_path TEXT NOT NULL,
       text_cache_path TEXT,
       cache_size_bytes INTEGER NOT NULL DEFAULT 0,
@@ -388,6 +394,8 @@ export function initializeDatabase() {
   );
   ensureColumn(db, "chunks", "min_timestamp_ms", "min_timestamp_ms INTEGER");
   ensureColumn(db, "chunks", "max_timestamp_ms", "max_timestamp_ms INTEGER");
+  ensureColumn(db, "chunks", "start_line_number", "start_line_number INTEGER");
+  ensureColumn(db, "chunks", "end_line_number", "end_line_number INTEGER");
   ensureColumn(
     db,
     "job_results",
@@ -407,6 +415,8 @@ function mapChunkRow(row: ChunkRow): CacheChunkRecord {
     chunkId: row.chunk_id,
     byteStart: row.byte_start,
     byteEnd: row.byte_end,
+    startLineNumber: row.start_line_number,
+    endLineNumber: row.end_line_number,
     artifactPath: row.artifact_path,
     textCachePath: row.text_cache_path,
     cacheSizeBytes: row.cache_size_bytes ?? 0,
@@ -1022,10 +1032,12 @@ export function upsertCacheChunk(input: UpsertCacheChunkInput) {
   db.prepare(
     `INSERT INTO chunks (
       chunk_pk, bucket, object_key, etag, chunk_id, byte_start, byte_end,
+      start_line_number, end_line_number,
       artifact_path, text_cache_path, cache_size_bytes, trigram_count, line_count,
       min_timestamp_ms, max_timestamp_ms, created_at, last_accessed_at
     ) VALUES (
       @chunkPk, @bucket, @objectKey, @etag, @chunkId, @byteStart, @byteEnd,
+      @startLineNumber, @endLineNumber,
       @artifactPath, @textCachePath, @cacheSizeBytes, @trigramCount, @lineCount,
       @minTimestampMs, @maxTimestampMs,
       @createdAt, @lastAccessedAt
@@ -1037,6 +1049,8 @@ export function upsertCacheChunk(input: UpsertCacheChunkInput) {
       chunk_id = excluded.chunk_id,
       byte_start = excluded.byte_start,
       byte_end = excluded.byte_end,
+      start_line_number = excluded.start_line_number,
+      end_line_number = excluded.end_line_number,
       artifact_path = excluded.artifact_path,
       text_cache_path = excluded.text_cache_path,
       cache_size_bytes = excluded.cache_size_bytes,
@@ -1053,6 +1067,8 @@ export function upsertCacheChunk(input: UpsertCacheChunkInput) {
     chunkId: input.chunkId,
     byteStart: input.byteStart,
     byteEnd: input.byteEnd,
+    startLineNumber: input.startLineNumber,
+    endLineNumber: input.endLineNumber,
     artifactPath: input.artifactPath,
     textCachePath: input.textCachePath,
     cacheSizeBytes: input.cacheSizeBytes,

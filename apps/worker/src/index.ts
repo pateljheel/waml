@@ -180,6 +180,8 @@ async function writeCachedChunkArtifact({
   chunkText,
   byteStart,
   byteEnd,
+  startLineNumber,
+  endLineNumber,
   minTimestampMs,
   maxTimestampMs,
 }: {
@@ -191,6 +193,8 @@ async function writeCachedChunkArtifact({
   chunkText: string;
   byteStart: number;
   byteEnd: number;
+  startLineNumber: number | null;
+  endLineNumber: number | null;
   minTimestampMs: number | null;
   maxTimestampMs: number | null;
 }) {
@@ -224,6 +228,8 @@ async function writeCachedChunkArtifact({
     chunkId,
     byteStart,
     byteEnd: Math.min(byteEnd, objectSize),
+    startLineNumber,
+    endLineNumber,
     artifactPath: cachePaths.trigramPath,
     textCachePath: cachePaths.textPath,
     cacheSizeBytes,
@@ -551,6 +557,7 @@ async function processObject({
   let chunkTextBytes = 0;
   let chunkLineCount = 0;
   let chunkByteStart = 0;
+  let chunkStartLineNumber: number | null = null;
   let chunkMinTimestampMs: number | null = null;
   let chunkMaxTimestampMs: number | null = null;
 
@@ -584,6 +591,11 @@ async function processObject({
       chunkText,
       byteStart: chunkByteStart,
       byteEnd: chunkByteStart + chunkTextBytes,
+      startLineNumber: chunkStartLineNumber,
+      endLineNumber:
+        chunkStartLineNumber === null
+          ? null
+          : chunkStartLineNumber + chunkLineCount - 1,
       minTimestampMs: chunkMinTimestampMs,
       maxTimestampMs: chunkMaxTimestampMs,
     });
@@ -592,6 +604,7 @@ async function processObject({
     chunkTextParts = [];
     chunkTextBytes = 0;
     chunkLineCount = 0;
+    chunkStartLineNumber = null;
     chunkMinTimestampMs = null;
     chunkMaxTimestampMs = null;
   }
@@ -628,6 +641,9 @@ async function processObject({
 
       for (const lineText of lines) {
         lineNumber += 1;
+        if (chunkStartLineNumber === null) {
+          chunkStartLineNumber = lineNumber;
+        }
         const lineWithNewline = `${lineText}\n`;
         chunkTextParts.push(lineWithNewline);
         chunkTextBytes += Buffer.byteLength(lineWithNewline);
@@ -709,6 +725,9 @@ async function processObject({
 
     if (bufferedText) {
       lineNumber += 1;
+      if (chunkStartLineNumber === null) {
+        chunkStartLineNumber = lineNumber;
+      }
       chunkTextParts.push(bufferedText);
       chunkTextBytes += Buffer.byteLength(bufferedText);
       chunkLineCount += 1;
