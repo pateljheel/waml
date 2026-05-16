@@ -94,6 +94,26 @@ type ChunkRow = {
   last_accessed_at: string;
 };
 
+type ManifestScopeRow = {
+  bucket: string;
+  root_prefix: string;
+  scope_prefix: string;
+  last_refreshed_at: string;
+  object_count: number;
+};
+
+type ManifestObjectRow = {
+  bucket: string;
+  root_prefix: string;
+  scope_prefix: string;
+  object_key: string;
+  etag: string;
+  size: number;
+  last_modified: string;
+  discovered_at: string;
+  last_seen_at: string;
+};
+
 export type CacheChunkRecord = {
   chunkPk: string;
   bucket: string;
@@ -119,6 +139,26 @@ export type UpsertCacheChunkInput = Omit<
 > & {
   createdAt?: string;
   lastAccessedAt?: string;
+};
+
+export type ManifestScopeRecord = {
+  bucket: string;
+  rootPrefix: string;
+  scopePrefix: string;
+  lastRefreshedAt: string;
+  objectCount: number;
+};
+
+export type ManifestObjectRecord = {
+  bucket: string;
+  rootPrefix: string;
+  scopePrefix: string;
+  objectKey: string;
+  etag: string;
+  size: number;
+  lastModified: string;
+  discoveredAt: string;
+  lastSeenAt: string;
 };
 
 export function getDatabaseFilePath() {
@@ -226,6 +266,31 @@ export function initializeDatabase() {
       discovered_at TEXT NOT NULL,
       PRIMARY KEY (object_key, etag)
     );
+
+    CREATE TABLE IF NOT EXISTS manifest_scopes (
+      bucket TEXT NOT NULL,
+      root_prefix TEXT NOT NULL,
+      scope_prefix TEXT NOT NULL,
+      last_refreshed_at TEXT NOT NULL,
+      object_count INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (bucket, root_prefix, scope_prefix)
+    );
+
+    CREATE TABLE IF NOT EXISTS manifest_objects (
+      bucket TEXT NOT NULL,
+      root_prefix TEXT NOT NULL,
+      scope_prefix TEXT NOT NULL,
+      object_key TEXT NOT NULL,
+      etag TEXT NOT NULL DEFAULT '',
+      size INTEGER NOT NULL DEFAULT 0,
+      last_modified TEXT NOT NULL DEFAULT '',
+      discovered_at TEXT NOT NULL,
+      last_seen_at TEXT NOT NULL,
+      PRIMARY KEY (bucket, root_prefix, scope_prefix, object_key)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_manifest_objects_scope_order
+      ON manifest_objects (bucket, root_prefix, scope_prefix, object_key);
 
     CREATE TABLE IF NOT EXISTS chunks (
       chunk_pk TEXT PRIMARY KEY,
@@ -351,6 +416,30 @@ function mapChunkRow(row: ChunkRow): CacheChunkRecord {
     maxTimestampMs: row.max_timestamp_ms,
     createdAt: row.created_at,
     lastAccessedAt: row.last_accessed_at,
+  };
+}
+
+function mapManifestScopeRow(row: ManifestScopeRow): ManifestScopeRecord {
+  return {
+    bucket: row.bucket,
+    rootPrefix: row.root_prefix,
+    scopePrefix: row.scope_prefix,
+    lastRefreshedAt: row.last_refreshed_at,
+    objectCount: row.object_count ?? 0,
+  };
+}
+
+function mapManifestObjectRow(row: ManifestObjectRow): ManifestObjectRecord {
+  return {
+    bucket: row.bucket,
+    rootPrefix: row.root_prefix,
+    scopePrefix: row.scope_prefix,
+    objectKey: row.object_key,
+    etag: row.etag,
+    size: row.size ?? 0,
+    lastModified: row.last_modified,
+    discoveredAt: row.discovered_at,
+    lastSeenAt: row.last_seen_at,
   };
 }
 
@@ -1081,4 +1170,104 @@ export function deleteCacheChunksBySourcePrefix(bucket: string, rootPrefix: stri
   }
 
   return existing;
+}
+
+export function getManifestScope(
+  bucket: string,
+  rootPrefix: string,
+  scopePrefix: string,
+) {
+  const db = initializeDatabase();
+  const row = db
+    .prepare(
+      `SELECT * FROM manifest_scopes
+       WHERE bucket = ? AND root_prefix = ? AND scope_prefix = ?`,
+    )
+    .get(bucket, rootPrefix, scopePrefix) as ManifestScopeRow | undefined;
+
+  return row ? mapManifestScopeRow(row) : null;
+}
+
+export function listManifestObjects(
+  bucket: string,
+  rootPrefix: string,
+  scopePrefix: string,
+) {
+  const db = initializeDatabase();
+  const rows = db
+    .prepare(
+      `SELECT * FROM manifest_objects
+       WHERE bucket = ? AND root_prefix = ? AND scope_prefix = ?
+       ORDER BY object_key ASC`,
+    )
+    .all(bucket, rootPrefix, scopePrefix) as ManifestObjectRow[];
+
+  return rows.map(mapManifestObjectRow);
+}
+
+export function replaceManifestScopeObjects({
+  bucket,
+  rootPrefix,
+  scopePrefix,
+  objects,
+  refreshedAt,
+}: {
+  bucket: string;
+  rootPrefix: string;
+  scopePrefix: string;
+  objects: Array<{
+    objectKey: string;
+    etag: string;
+    size: number;
+    lastModified: string;
+  }>;
+  refreshedAt?: string;
+}) {
+  const db = initializeDatabase();
+  const now = refreshedAt ?? new Date().toISOString();
+  const deleteObjects = db.prepare(
+    `DELETE FROM manifest_objects
+     WHERE bucket = ? AND root_prefix = ? AND scope_prefix = ?`,
+  );
+  const insertObject = db.prepare(
+    `INSERT INTO manifest_objects (
+      bucket, root_prefix, scope_prefix, object_key, etag, size, last_modified, discovered_at, last_seen_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+  const upsertScope = db.prepare(
+    `INSERT INTO manifest_scopes (
+      bucket, root_prefix, scope_prefix, last_refreshed_at, object_count
+    ) VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(bucket, root_prefix, scope_prefix) DO UPDATE SET
+      last_refreshed_at = excluded.last_refreshed_at,
+      object_count = excluded.object_count`,
+  );
+
+  db.exec("BEGIN");
+
+  try {
+    deleteObjects.run(bucket, rootPrefix, scopePrefix);
+
+    for (const object of objects) {
+      insertObject.run(
+        bucket,
+        rootPrefix,
+        scopePrefix,
+        object.objectKey,
+        object.etag,
+        object.size,
+        object.lastModified,
+        now,
+        now,
+      );
+    }
+
+    upsertScope.run(bucket, rootPrefix, scopePrefix, now, objects.length);
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+
+  return getManifestScope(bucket, rootPrefix, scopePrefix);
 }

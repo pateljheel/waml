@@ -1,6 +1,5 @@
 import {
   GetObjectCommand,
-  ListObjectsV2Command,
   S3Client,
 } from "@aws-sdk/client-s3";
 import {
@@ -59,6 +58,10 @@ import {
   extractHiveValues,
   objectMatchesFilters,
 } from "./path-filters";
+import {
+  deriveManifestScopePrefixes,
+  loadManifestScopeObjects,
+} from "./manifest";
 import { createS3Client, sendWithCredentialRefresh } from "./s3";
 import fsSync from "node:fs";
 import fs from "node:fs/promises";
@@ -770,7 +773,6 @@ async function runSearchJob(job: SearchJob) {
   const pendingMatches: SearchMatch[] = [];
   const lastProgressAt = { value: Date.now() };
   const lastMatchAt = { value: Date.now() };
-  let continuationToken = job.scanContinuationToken.trim() || undefined;
   const queryStartEpochMs = parseQueryTimestamp(
     job.startTime,
     job.timeConfig.timezone,
@@ -779,8 +781,26 @@ async function runSearchJob(job: SearchJob) {
     job.endTime,
     job.timeConfig.timezone,
   );
+  const scopePrefixes = deriveManifestScopePrefixes(
+    job,
+    queryStartEpochMs,
+    queryEndEpochMs,
+  );
+  const continuationToken = job.scanContinuationToken.trim();
+  let scopeStartIndex = 0;
+  let objectStartIndex = 0;
 
-  while (true) {
+  if (continuationToken.startsWith("manifest:")) {
+    const [, rawScopeIndex, rawObjectIndex] = continuationToken.split(":");
+    scopeStartIndex = Math.max(0, Number(rawScopeIndex) || 0);
+    objectStartIndex = Math.max(0, Number(rawObjectIndex) || 0);
+  }
+
+  for (
+    let scopeIndex = scopeStartIndex;
+    scopeIndex < scopePrefixes.length;
+    scopeIndex += 1
+  ) {
     if (isJobCancellationRequested(job.id)) {
       await flushMatches(job.id, pendingMatches);
       await flushProgress(job.id, progress);
@@ -788,43 +808,19 @@ async function runSearchJob(job: SearchJob) {
       return;
     }
 
-    const response = await sendWithCredentialRefresh({
+    const scopePrefix = scopePrefixes[scopeIndex];
+    const objects = await loadManifestScopeObjects({
       clientRef,
-      profile: job.source.awsProfile,
-      operation: (client) =>
-        client.send(
-          new ListObjectsV2Command({
-            Bucket: job.source.bucket,
-            Prefix: job.source.rootPrefix.trim() || undefined,
-            ContinuationToken: continuationToken,
-            MaxKeys: 250,
-          }),
-        ),
+      job,
+      scopePrefix,
+      queryStartEpochMs,
+      queryEndEpochMs,
     });
+    const startIndex = scopeIndex === scopeStartIndex ? objectStartIndex : 0;
 
-    const objects = (response.Contents ?? [])
-      .map(
-        (entry: {
-          Key?: string;
-          ETag?: string;
-          Size?: number;
-        }) => ({
-          key: entry.Key,
-          etag: entry.ETag?.replaceAll('"', "") ?? "",
-          size: entry.Size ?? 0,
-        }),
-      )
-      .filter(
-        (
-          entry,
-        ): entry is {
-          key: string;
-          etag: string;
-          size: number;
-        } => Boolean(entry.key) && entry.key !== job.source.rootPrefix,
-      );
+    for (let objectIndex = startIndex; objectIndex < objects.length; objectIndex += 1) {
+      const object = objects[objectIndex];
 
-    for (const object of objects) {
       if (!objectMatchesFilters(job, object.key)) {
         continue;
       }
@@ -848,27 +844,23 @@ async function runSearchJob(job: SearchJob) {
         queryStartEpochMs,
         queryEndEpochMs,
       });
+
+      const latestJob = getJob(job.id);
+
+      if (
+        latestJob &&
+        countJobResults(job.id) >= latestJob.requestedResultsCount
+      ) {
+        const nextScopeIndex =
+          objectIndex + 1 >= objects.length ? scopeIndex + 1 : scopeIndex;
+        const nextObjectIndex =
+          objectIndex + 1 >= objects.length ? 0 : objectIndex + 1;
+        pauseJob(job.id, `manifest:${nextScopeIndex}:${nextObjectIndex}`);
+        return;
+      }
     }
 
-    await flushMatches(job.id, pendingMatches);
-    await flushProgress(job.id, progress);
-
-    continuationToken = response.NextContinuationToken ?? undefined;
-
-    const latestJob = getJob(job.id);
-
-    if (
-      continuationToken &&
-      latestJob &&
-      countJobResults(job.id) >= latestJob.requestedResultsCount
-    ) {
-      pauseJob(job.id, continuationToken);
-      return;
-    }
-
-    if (!continuationToken) {
-      break;
-    }
+    objectStartIndex = 0;
   }
 
   await flushMatches(job.id, pendingMatches);
