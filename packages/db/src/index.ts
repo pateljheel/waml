@@ -81,6 +81,7 @@ type ChunkRow = {
   provider: StorageProvider;
   bucket: string;
   object_key: string;
+  version_token: string;
   etag: string;
   chunk_id: string;
   byte_start: number;
@@ -113,6 +114,7 @@ type ManifestObjectRow = {
   root_prefix: string;
   scope_prefix: string;
   object_key: string;
+  version_token: string;
   etag: string;
   size: number;
   last_modified: string;
@@ -125,6 +127,7 @@ export type CacheChunkRecord = {
   provider: StorageProvider;
   bucket: string;
   objectKey: string;
+  versionToken: string;
   etag: string;
   chunkId: string;
   byteStart: number;
@@ -165,6 +168,7 @@ export type ManifestObjectRecord = {
   rootPrefix: string;
   scopePrefix: string;
   objectKey: string;
+  versionToken: string;
   etag: string;
   size: number;
   lastModified: string;
@@ -250,6 +254,7 @@ export function initializeDatabase() {
       job_id TEXT NOT NULL,
       sequence_no INTEGER NOT NULL,
       object_key TEXT NOT NULL,
+      version_token TEXT NOT NULL DEFAULT '',
       etag TEXT NOT NULL DEFAULT '',
       line_number INTEGER NOT NULL,
       timestamp_text TEXT,
@@ -294,6 +299,7 @@ export function initializeDatabase() {
       root_prefix TEXT NOT NULL,
       scope_prefix TEXT NOT NULL,
       object_key TEXT NOT NULL,
+      version_token TEXT NOT NULL DEFAULT '',
       etag TEXT NOT NULL DEFAULT '',
       size INTEGER NOT NULL DEFAULT 0,
       last_modified TEXT NOT NULL DEFAULT '',
@@ -310,6 +316,7 @@ export function initializeDatabase() {
       provider TEXT NOT NULL DEFAULT 's3',
       bucket TEXT NOT NULL DEFAULT '',
       object_key TEXT NOT NULL,
+      version_token TEXT NOT NULL DEFAULT '',
       etag TEXT NOT NULL,
       chunk_id TEXT NOT NULL,
       byte_start INTEGER NOT NULL,
@@ -422,8 +429,26 @@ export function initializeDatabase() {
   ensureColumn(
     db,
     "job_results",
+    "version_token",
+    "version_token TEXT NOT NULL DEFAULT ''",
+  );
+  ensureColumn(
+    db,
+    "job_results",
     "etag",
     "etag TEXT NOT NULL DEFAULT ''",
+  );
+  ensureColumn(
+    db,
+    "chunks",
+    "version_token",
+    "version_token TEXT NOT NULL DEFAULT ''",
+  );
+  ensureColumn(
+    db,
+    "manifest_objects",
+    "version_token",
+    "version_token TEXT NOT NULL DEFAULT ''",
   );
 
   return db;
@@ -435,6 +460,7 @@ function mapChunkRow(row: ChunkRow): CacheChunkRecord {
     provider: row.provider,
     bucket: row.bucket,
     objectKey: row.object_key,
+    versionToken: row.version_token || row.etag,
     etag: row.etag,
     chunkId: row.chunk_id,
     byteStart: row.byte_start,
@@ -471,6 +497,7 @@ function mapManifestObjectRow(row: ManifestObjectRow): ManifestObjectRecord {
     rootPrefix: row.root_prefix,
     scopePrefix: row.scope_prefix,
     objectKey: row.object_key,
+    versionToken: row.version_token || row.etag,
     etag: row.etag,
     size: row.size ?? 0,
     lastModified: row.last_modified,
@@ -759,8 +786,8 @@ export function appendJobResults(jobId: string, matches: SearchMatch[]) {
 
   const insert = db.prepare(
     `INSERT INTO job_results (
-      job_id, sequence_no, object_key, etag, line_number, timestamp_text, line_text, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      job_id, sequence_no, object_key, version_token, etag, line_number, timestamp_text, line_text, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
 
   for (const match of matches) {
@@ -769,6 +796,7 @@ export function appendJobResults(jobId: string, matches: SearchMatch[]) {
       jobId,
       sequenceNo,
       match.objectKey,
+      match.versionToken ?? match.etag ?? "",
       match.etag ?? "",
       match.lineNumber,
       match.timestampText ?? null,
@@ -799,7 +827,7 @@ export function listJobResultsAfterSequence(
   const safePageSize = Math.max(1, pageSize);
   const rows = db
     .prepare(
-      `SELECT sequence_no, object_key, line_number, timestamp_text, line_text, etag
+    `SELECT sequence_no, object_key, line_number, timestamp_text, line_text, version_token, etag
        FROM job_results
        WHERE job_id = ? AND sequence_no > ?
        ORDER BY sequence_no ASC
@@ -808,6 +836,7 @@ export function listJobResultsAfterSequence(
     .all(jobId, safeAfterSequenceNo, safePageSize) as Array<{
       sequence_no: number;
       object_key: string;
+      version_token: string;
       etag: string;
       line_number: number;
       timestamp_text: string | null;
@@ -817,6 +846,7 @@ export function listJobResultsAfterSequence(
   return rows.map((row) => ({
     sequenceNo: row.sequence_no,
     objectKey: row.object_key,
+    versionToken: row.version_token || row.etag || undefined,
     etag: row.etag || undefined,
     lineNumber: row.line_number,
     timestampText: row.timestamp_text ?? undefined,
@@ -1051,16 +1081,16 @@ export function listCacheChunksForObject(
   provider: StorageProvider,
   bucket: string,
   objectKey: string,
-  etag: string,
+  versionToken: string,
 ) {
   const db = initializeDatabase();
   const rows = db
     .prepare(
       `SELECT * FROM chunks
-       WHERE provider = ? AND bucket = ? AND object_key = ? AND etag = ?
+       WHERE provider = ? AND bucket = ? AND object_key = ? AND version_token = ?
        ORDER BY CAST(chunk_id AS INTEGER) ASC, created_at ASC`,
     )
-    .all(provider, bucket, objectKey, etag) as ChunkRow[];
+    .all(provider, bucket, objectKey, versionToken) as ChunkRow[];
 
   return rows.map(mapChunkRow);
 }
@@ -1073,12 +1103,12 @@ export function upsertCacheChunk(input: UpsertCacheChunkInput) {
 
   db.prepare(
     `INSERT INTO chunks (
-      chunk_pk, provider, bucket, object_key, etag, chunk_id, byte_start, byte_end,
+      chunk_pk, provider, bucket, object_key, version_token, etag, chunk_id, byte_start, byte_end,
       start_line_number, end_line_number,
       artifact_path, text_cache_path, cache_size_bytes, trigram_count, line_count,
       min_timestamp_ms, max_timestamp_ms, created_at, last_accessed_at
     ) VALUES (
-      @chunkPk, @provider, @bucket, @objectKey, @etag, @chunkId, @byteStart, @byteEnd,
+      @chunkPk, @provider, @bucket, @objectKey, @versionToken, @etag, @chunkId, @byteStart, @byteEnd,
       @startLineNumber, @endLineNumber,
       @artifactPath, @textCachePath, @cacheSizeBytes, @trigramCount, @lineCount,
       @minTimestampMs, @maxTimestampMs,
@@ -1088,6 +1118,7 @@ export function upsertCacheChunk(input: UpsertCacheChunkInput) {
       provider = excluded.provider,
       bucket = excluded.bucket,
       object_key = excluded.object_key,
+      version_token = excluded.version_token,
       etag = excluded.etag,
       chunk_id = excluded.chunk_id,
       byte_start = excluded.byte_start,
@@ -1107,6 +1138,7 @@ export function upsertCacheChunk(input: UpsertCacheChunkInput) {
     provider: input.provider,
     bucket: input.bucket,
     objectKey: input.objectKey,
+    versionToken: input.versionToken,
     etag: input.etag,
     chunkId: input.chunkId,
     byteStart: input.byteStart,
@@ -1175,9 +1207,9 @@ export function deleteCacheChunksForObject(
   provider: StorageProvider,
   bucket: string,
   objectKey: string,
-  etag: string,
+  versionToken: string,
 ) {
-  const existing = listCacheChunksForObject(provider, bucket, objectKey, etag);
+  const existing = listCacheChunksForObject(provider, bucket, objectKey, versionToken);
 
   if (existing.length === 0) {
     return [];
@@ -1185,8 +1217,8 @@ export function deleteCacheChunksForObject(
 
   const db = initializeDatabase();
   db.prepare(
-    "DELETE FROM chunks WHERE provider = ? AND bucket = ? AND object_key = ? AND etag = ?",
-  ).run(provider, bucket, objectKey, etag);
+    "DELETE FROM chunks WHERE provider = ? AND bucket = ? AND object_key = ? AND version_token = ?",
+  ).run(provider, bucket, objectKey, versionToken);
   return existing;
 }
 
@@ -1293,6 +1325,7 @@ export function replaceManifestScopeObjects({
   scopePrefix: string;
   objects: Array<{
     objectKey: string;
+    versionToken: string;
     etag: string;
     size: number;
     lastModified: string;
@@ -1307,8 +1340,8 @@ export function replaceManifestScopeObjects({
   );
   const insertObject = db.prepare(
     `INSERT INTO manifest_objects (
-      provider, bucket, root_prefix, scope_prefix, object_key, etag, size, last_modified, discovered_at, last_seen_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      provider, bucket, root_prefix, scope_prefix, object_key, version_token, etag, size, last_modified, discovered_at, last_seen_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
   const upsertScope = db.prepare(
     `INSERT OR REPLACE INTO manifest_scopes (
@@ -1328,6 +1361,7 @@ export function replaceManifestScopeObjects({
         rootPrefix,
         scopePrefix,
         object.objectKey,
+        object.versionToken,
         object.etag,
         object.size,
         object.lastModified,

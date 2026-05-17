@@ -765,7 +765,7 @@ export default function HomePage() {
   }
 
   function getResultContextKey(result: SearchMatch) {
-    return `${result.objectKey}:${result.etag ?? ""}:${result.lineNumber}`;
+    return `${result.objectKey}:${result.versionToken ?? result.etag ?? ""}:${result.lineNumber}`;
   }
 
   async function toggleResultContext(result: SearchMatch) {
@@ -823,6 +823,8 @@ export default function HomePage() {
     const response = await fetch(
       `/api/search/${currentSearch.jobId}/context?objectKey=${encodeURIComponent(
         result.objectKey,
+      )}&versionToken=${encodeURIComponent(
+        result.versionToken ?? result.etag ?? "",
       )}&etag=${encodeURIComponent(result.etag ?? "")}&lineNumber=${
         result.lineNumber
       }&before=${activeNotebook.contextLineCount}&after=${activeNotebook.contextLineCount}`,

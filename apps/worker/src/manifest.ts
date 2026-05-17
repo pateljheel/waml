@@ -18,6 +18,7 @@ const defaultManifestColdTtlMs = 60 * 60 * 1000;
 
 type ScopedObject = {
   key: string;
+  versionToken: string;
   etag: string;
   size: number;
   lastModified: string;
@@ -428,6 +429,7 @@ async function refreshManifestScope({
 
       objects.push({
         key: entry.key,
+        versionToken: entry.etag,
         etag: entry.etag,
         size: entry.size,
         lastModified: entry.lastModified,
@@ -444,6 +446,7 @@ async function refreshManifestScope({
     scopePrefix,
     objects: objects.map((object) => ({
       objectKey: object.key,
+      versionToken: object.versionToken,
       etag: object.etag,
       size: object.size,
       lastModified: object.lastModified,
@@ -488,6 +491,7 @@ export async function loadManifestScopeObjects({
         scopePrefix,
       ).map((object) => ({
         key: object.objectKey,
+        versionToken: object.versionToken,
         etag: object.etag,
         size: object.size,
         lastModified: object.lastModified,

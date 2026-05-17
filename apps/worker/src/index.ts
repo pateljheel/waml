@@ -80,6 +80,7 @@ async function scanCachedTextFile({
   filepath,
   job,
   objectKey,
+  versionToken,
   etag,
   progress,
   pendingMatches,
@@ -91,6 +92,7 @@ async function scanCachedTextFile({
   filepath: string;
   job: SearchJob;
   objectKey: string;
+  versionToken: string;
   etag: string;
   progress: SearchJob["progress"];
   pendingMatches: SearchMatch[];
@@ -143,6 +145,7 @@ async function scanCachedTextFile({
 
     pendingMatches.push({
       objectKey,
+      versionToken,
       etag,
       lineNumber,
       lineText,
@@ -170,6 +173,7 @@ async function scanCachedTextFile({
 async function writeCachedChunkArtifact({
   job,
   objectKey,
+  versionToken,
   etag,
   objectSize,
   chunkId,
@@ -183,6 +187,7 @@ async function writeCachedChunkArtifact({
 }: {
   job: SearchJob;
   objectKey: string;
+  versionToken: string;
   etag: string;
   objectSize: number;
   chunkId: string;
@@ -198,7 +203,7 @@ async function writeCachedChunkArtifact({
     job.source.provider,
     job.source.bucket,
     objectKey,
-    etag,
+    versionToken,
     chunkId,
   );
   const cachePaths = getObjectCachePaths(chunkPk);
@@ -227,6 +232,7 @@ async function writeCachedChunkArtifact({
     provider: job.source.provider,
     bucket: job.source.bucket,
     objectKey,
+    versionToken,
     etag,
     chunkId,
     byteStart,
@@ -343,6 +349,7 @@ async function processObject({
   reader,
   job,
   objectKey,
+  versionToken,
   etag,
   objectSize,
   relativePath,
@@ -356,6 +363,7 @@ async function processObject({
   reader: Awaited<ReturnType<typeof createObjectStoreReader>>;
   job: SearchJob;
   objectKey: string;
+  versionToken: string;
   etag: string;
   objectSize: number;
   relativePath: string;
@@ -375,7 +383,7 @@ async function processObject({
     job.source.provider,
     job.source.bucket,
     objectKey,
-    etag,
+    versionToken,
   );
   const partitionValues =
     extractCustomValues(relativePath, job.customPathPattern) ??
@@ -474,6 +482,7 @@ async function processObject({
         filepath: cachedChunk.textCachePath!,
         job,
         objectKey,
+        versionToken,
         etag,
         progress,
         pendingMatches,
@@ -491,7 +500,7 @@ async function processObject({
       job.source.provider,
       job.source.bucket,
       objectKey,
-      etag,
+      versionToken,
     );
     await Promise.allSettled(
       staleChunks.flatMap((chunk) => [
@@ -589,6 +598,7 @@ async function processObject({
     await writeCachedChunkArtifact({
       job,
       objectKey,
+      versionToken,
       etag,
       objectSize,
       chunkId,
@@ -700,6 +710,7 @@ async function processObject({
 
         pendingMatches.push({
           objectKey,
+          versionToken,
           etag,
           lineNumber,
           lineText,
@@ -772,6 +783,7 @@ async function processObject({
         ) {
           pendingMatches.push({
             objectKey,
+            versionToken,
             etag,
             lineNumber,
             lineText: bufferedText,
@@ -855,6 +867,7 @@ async function runSearchJob(job: SearchJob) {
         reader,
         job,
         objectKey: object.key,
+        versionToken: object.versionToken,
         etag: object.etag,
         objectSize: object.size,
         relativePath,

@@ -92,6 +92,7 @@ export type SearchProgress = z.infer<typeof searchProgressSchema>;
 
 export const searchMatchSchema = z.object({
   objectKey: z.string().min(1),
+  versionToken: z.string().min(1).optional(),
   etag: z.string().min(1).optional(),
   lineNumber: z.number().int().positive(),
   lineText: z.string(),

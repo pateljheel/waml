@@ -1,5 +1,6 @@
 import { GetObjectCommand } from "@aws-sdk/client-s3";
 import { getJob, listCacheChunksForObject } from "@waml/db";
+import type { StorageProvider } from "@waml/shared";
 import { NextResponse } from "next/server";
 import fs from "node:fs/promises";
 import { Readable } from "node:stream";
@@ -41,24 +42,24 @@ async function loadContextFromCache({
   provider,
   bucket,
   objectKey,
-  etag,
+  versionToken,
   lineNumber,
   before,
   after,
 }: {
-  provider: "s3";
+  provider: StorageProvider;
   bucket: string;
   objectKey: string;
-  etag: string;
+  versionToken: string;
   lineNumber: number;
   before: number;
   after: number;
 }) {
-  if (!etag) {
+  if (!versionToken) {
     return null;
   }
 
-  const chunks = listCacheChunksForObject(provider, bucket, objectKey, etag).filter(
+  const chunks = listCacheChunksForObject(provider, bucket, objectKey, versionToken).filter(
     (chunk) => chunk.textCachePath,
   );
 
@@ -255,6 +256,10 @@ export async function GET(
 
   const searchParams = new URL(request.url).searchParams;
   const objectKey = searchParams.get("objectKey")?.trim() ?? "";
+  const versionToken =
+    searchParams.get("versionToken")?.trim() ??
+    searchParams.get("etag")?.trim() ??
+    "";
   const etag = searchParams.get("etag")?.trim() ?? "";
   const lineNumber = Number(searchParams.get("lineNumber") ?? "0");
   const before = Math.max(0, Number(searchParams.get("before") ?? "20") || 20);
@@ -272,7 +277,7 @@ export async function GET(
       provider: job.source.provider,
       bucket: job.source.bucket,
       objectKey,
-      etag,
+      versionToken,
       lineNumber,
       before,
       after,
@@ -292,6 +297,7 @@ export async function GET(
   return NextResponse.json(
     {
       objectKey,
+      versionToken: versionToken || null,
       etag: etag || null,
       lineNumber,
       before,
