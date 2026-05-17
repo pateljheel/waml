@@ -69,6 +69,16 @@ function getProfileRegion(profile: string, configSections: IniSectionMap) {
   );
 }
 
+function createDynamicIniCredentialsProvider(profile: string) {
+  return async () => {
+    const provider = fromIni({ profile });
+    const credentials = await provider();
+    return {
+      ...credentials,
+    };
+  };
+}
+
 export async function createS3Client(profile: string) {
   const configContent = await readIfPresent(configPath);
   const configSections = parseIniSections(configContent);
@@ -76,7 +86,7 @@ export async function createS3Client(profile: string) {
 
   return new S3Client({
     region,
-    credentials: fromIni({ profile }),
+    credentials: createDynamicIniCredentialsProvider(profile),
   });
 }
 

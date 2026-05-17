@@ -40,8 +40,58 @@ The current implementation works for targeted exploration, but a few scale limit
 
 ## Likely Next Fixes
 
-- Add a SQLite object manifest keyed by `bucket + rootPrefix + objectKey`.
+- Add a SQLite object manifest keyed by `bucket + rootPrefix + objectKey`. - Done
 - Replace `OFFSET` result paging with cursor or sequence-based paging.
-- Add chunk line-range metadata for faster context lookup.
+- Add chunk line-range metadata for faster context lookup. - Done
 - Improve pause and resume granularity to object or chunk level.
 - Persist partition value indexes instead of deriving them from repeated S3 scans.
+
+
+
+› How can we improve it without implementing partintion index
+
+
+• Yes. You can improve it a lot without building a full partition index.
+
+  Best improvements:
+
+  - derive discovery prefixes from the custom pattern
+      - don’t recurse blindly from rootPrefix
+      - use fixed literal segments and already-selected filter values to jump directly to narrower
+        prefixes
+      - this is the biggest win
+  - make traversal pattern-aware
+      - stop exploring branches that cannot match the custom pattern
+      - if the pattern expects year_month=.../DD-HH-...log, don’t walk unrelated shapes
+  - use progressive depth loading
+      - infer only the first few filter levels initially
+      - load deeper levels only after earlier filters are selected
+      - this avoids discovering the whole tree up front
+  - cascade filter values
+      - once service=foo is selected, load values for year_month only under that narrowed scope
+      - same for day, then hour
+      - much cheaper than global value discovery
+  - separate “definition inference” from “value enumeration”
+      - infer keys from a small sample
+      - fetch values lazily per key only when the dropdown is opened
+      - you already do part of this; the backend can still get much narrower
+  - increase reliance on time mappings
+      - if time fields are mapped, derive candidate prefixes from the selected time range
+      - this removes huge parts of the tree before filter discovery even starts
+  - cache recent inference results in memory or SQLite with short TTL
+      - not a full partition index
+      - just memoize recent (bucket, rootPrefix, pathPattern, selectedFilters) results
+      - useful for repeated UI interactions
+  - use S3 Delimiter="/" aggressively for intermediate levels
+      - browse level by level instead of collecting full relative paths
+      - cheaper and more controllable
+  - add explicit scope limits in UX
+      - require a narrower root prefix or time range before loading deep filters
+      - this is pragmatic and often necessary
+
+  If I had to prioritize without building a partition index:
+
+  1. pattern-aware prefix derivation
+  2. cascading lazy filter loading
+  3. time-range-based prefix narrowing
+  4. short-TTL cached inference results
