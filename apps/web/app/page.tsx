@@ -2498,7 +2498,7 @@ export default function HomePage() {
                 />
                 <span className="field-state">{`gcs://${activeNotebook.bucket}/${activeNotebook.rootPrefix}`}</span>
               </div>
-              <div className="field search-root-hint">
+              <div className="field field-gcs-auth">
                 <label htmlFor="gcs-auth-mode">GCS auth</label>
                 <select
                   className="control"
