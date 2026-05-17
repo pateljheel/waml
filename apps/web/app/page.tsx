@@ -3129,8 +3129,9 @@ export default function HomePage() {
                 </select>
               </div>
             </div>
-            <label className="search-option-toggle">
+            <div className="search-option-toggle">
               <input
+                id="search-case-sensitive"
                 type="checkbox"
                 checked={activeNotebook.searchOptions.caseSensitive}
                 onChange={(event) =>
@@ -3140,8 +3141,8 @@ export default function HomePage() {
                   })
                 }
               />
-              <span>Case-sensitive</span>
-            </label>
+              <label htmlFor="search-case-sensitive">Case-sensitive</label>
+            </div>
             <div className="search-summary">
               <span className={`search-status status-${currentSearchState.status}`}>
                 {searchStatusLabel(currentSearchState.status)}
