@@ -2203,6 +2203,35 @@ export default function HomePage() {
     return `${partition.selectedFilter.values.length} selected`;
   }
 
+  function getNotebookTimeSummary(notebook: Notebook) {
+    const start = notebook.startTime.trim();
+    const end = notebook.endTime.trim();
+
+    if (start && end) {
+      return `${start} -> ${end}`;
+    }
+
+    if (start) {
+      return `From ${start}`;
+    }
+
+    if (end) {
+      return `Until ${end}`;
+    }
+
+    return null;
+  }
+
+  function getNotebookSearchSummary(notebookId: string) {
+    const searchState = searchStateByNotebook[notebookId];
+
+    if (!searchState || searchState.status === "idle") {
+      return null;
+    }
+
+    return `${searchStatusLabel(searchState.status)} · ${searchState.progress.matchesFound} matches`;
+  }
+
   return (
     <main className="workspace">
       <aside className="sidebar">
@@ -2233,10 +2262,16 @@ export default function HomePage() {
                 </span>
               </div>
               <p className="notebook-query">{notebook.query}</p>
-              <div className="notebook-meta">
-                <span>{notebook.range}</span>
-                <span>{notebook.updatedAt}</span>
-              </div>
+              {getNotebookTimeSummary(notebook) || getNotebookSearchSummary(notebook.id) ? (
+                <div className="notebook-meta">
+                  {getNotebookTimeSummary(notebook) ? (
+                    <span>{getNotebookTimeSummary(notebook)}</span>
+                  ) : null}
+                  {getNotebookSearchSummary(notebook.id) ? (
+                    <span>{getNotebookSearchSummary(notebook.id)}</span>
+                  ) : null}
+                </div>
+              ) : null}
               <p className="notebook-source">
                 {notebook.awsProfile} · {notebook.bucket}/{notebook.rootPrefix}
               </p>
