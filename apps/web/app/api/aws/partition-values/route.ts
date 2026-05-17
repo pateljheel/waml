@@ -1,4 +1,5 @@
 import { searchPartitionValues } from "../../../../lib/aws";
+import { normalizePrefixFilters } from "@waml/shared";
 import { NextResponse } from "next/server";
 
 export const runtime = "nodejs";
@@ -13,6 +14,7 @@ export async function GET(request: Request) {
   const pathPattern = searchParams.get("pathPattern") ?? "";
   const key = searchParams.get("key");
   const search = searchParams.get("search") ?? "";
+  const selectedFiltersParam = searchParams.get("selectedFilters") ?? "";
   const page = Number(searchParams.get("page") ?? "1");
   const pageSize = Number(searchParams.get("pageSize") ?? "25");
 
@@ -29,6 +31,9 @@ export async function GET(request: Request) {
   }
 
   try {
+    const selectedFilters = selectedFiltersParam
+      ? normalizePrefixFilters(JSON.parse(selectedFiltersParam))
+      : {};
     const result = await searchPartitionValues({
       profile,
       bucket,
@@ -36,6 +41,7 @@ export async function GET(request: Request) {
       pathPattern,
       key,
       search,
+      selectedFilters,
       page: Number.isFinite(page) ? page : 1,
       pageSize: Number.isFinite(pageSize) ? pageSize : 25,
     });

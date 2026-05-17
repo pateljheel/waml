@@ -1,4 +1,5 @@
 import { inferPartitions } from "../../../../lib/aws";
+import { normalizePrefixFilters } from "@waml/shared";
 import { NextResponse } from "next/server";
 
 export const runtime = "nodejs";
@@ -11,6 +12,7 @@ export async function GET(request: Request) {
   const bucket = searchParams.get("bucket");
   const rootPrefix = searchParams.get("rootPrefix") ?? "";
   const pathPattern = searchParams.get("pathPattern") ?? "";
+  const selectedFiltersParam = searchParams.get("selectedFilters") ?? "";
 
   if (!profile || !bucket) {
     return NextResponse.json(
@@ -20,11 +22,15 @@ export async function GET(request: Request) {
   }
 
   try {
+    const selectedFilters = selectedFiltersParam
+      ? normalizePrefixFilters(JSON.parse(selectedFiltersParam))
+      : {};
     const result = await inferPartitions({
       profile,
       bucket,
       rootPrefix,
       pathPattern,
+      selectedFilters,
     });
     return NextResponse.json(result, {
       headers: {

@@ -382,6 +382,9 @@ export default function HomePage() {
 
   const activeNotebook =
     notebooks.find((notebook) => notebook.id === activeNotebookId) ?? notebooks[0];
+  const activePartitionFiltersJson = JSON.stringify(
+    activeNotebook.partitionFilters ?? {},
+  );
   const partitionPickerQueryKey = JSON.stringify(
     Object.entries(partitionPickerState)
       .filter(([, state]) => state.open)
@@ -1453,7 +1456,9 @@ export default function HomePage() {
             activeNotebook.bucket,
           )}&rootPrefix=${encodeURIComponent(
             activeNotebook.rootPrefix,
-          )}&pathPattern=${encodeURIComponent(activeNotebook.customPathPattern)}`,
+          )}&pathPattern=${encodeURIComponent(
+            activeNotebook.customPathPattern,
+          )}&selectedFilters=${encodeURIComponent(activePartitionFiltersJson)}`,
           {
             cache: "no-store",
           },
@@ -1528,6 +1533,7 @@ export default function HomePage() {
     activeNotebook.bucket,
     activeNotebook.rootPrefix,
     activeNotebook.customPathPattern,
+    activePartitionFiltersJson,
     activeNotebookId,
   ]);
 
@@ -1578,6 +1584,8 @@ export default function HomePage() {
               activeNotebook.customPathPattern,
             )}&key=${encodeURIComponent(key)}&search=${encodeURIComponent(
               state.search,
+            )}&selectedFilters=${encodeURIComponent(
+              activePartitionFiltersJson,
             )}&page=${state.page}&pageSize=25`,
             {
               cache: "no-store",
@@ -1633,6 +1641,7 @@ export default function HomePage() {
     activeNotebook.bucket,
     activeNotebook.rootPrefix,
     activeNotebook.customPathPattern,
+    activePartitionFiltersJson,
   ]);
 
   const profileChoices =

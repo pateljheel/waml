@@ -6,6 +6,8 @@ import {
   S3Client,
 } from "@aws-sdk/client-s3";
 import { fromIni } from "@aws-sdk/credential-providers";
+import type { PrefixFilters } from "@waml/shared";
+import { normalizePrefixFilters } from "@waml/shared";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -206,6 +208,7 @@ type PartitionDefinitionAccumulator = Map<
     values: Set<string>;
   }
 >;
+const maxDerivedDiscoveryPrefixes = 16;
 
 async function listAllChildrenForBucketLevel({
   client,
@@ -259,6 +262,9 @@ async function collectRelativePrefixes({
   profile,
   bucket,
   rootPrefix,
+  pathPattern,
+  selectedFilters,
+  ignoreFilterKey,
   maxDepth = 6,
   maxKeysPerLevel = 200,
   maxPrefixesToVisit = 500,
@@ -266,6 +272,9 @@ async function collectRelativePrefixes({
   profile: string;
   bucket: string;
   rootPrefix: string;
+  pathPattern?: string;
+  selectedFilters?: PrefixFilters;
+  ignoreFilterKey?: string;
   maxDepth?: number;
   maxKeysPerLevel?: number;
   maxPrefixesToVisit?: number;
@@ -273,9 +282,12 @@ async function collectRelativePrefixes({
   const client = await createS3Client(profile);
   const normalizedRootPrefix = rootPrefix.trim();
   const relativePaths = new Set<string>();
-  const queue: Array<{ prefix: string; depth: number }> = [
-    { prefix: normalizedRootPrefix, depth: 0 },
-  ];
+  const queue: Array<{ prefix: string; depth: number }> = deriveDiscoveryPrefixes({
+    rootPrefix: normalizedRootPrefix,
+    pathPattern,
+    selectedFilters: selectedFilters ?? {},
+    ignoreFilterKey,
+  }).map((prefix) => ({ prefix, depth: 0 }));
   let visitedCount = 0;
 
   while (queue.length > 0 && visitedCount < maxPrefixesToVisit) {
@@ -301,6 +313,14 @@ async function collectRelativePrefixes({
       const relativePrefix = normalizedRootPrefix
         ? childPrefix.slice(normalizedRootPrefix.length)
         : childPrefix;
+
+      if (
+        pathPattern &&
+        !canRelativePathMatchPatternPrefix(relativePrefix, pathPattern)
+      ) {
+        continue;
+      }
+
       relativePaths.add(relativePrefix);
 
       queue.push({ prefix: childPrefix, depth: current.depth + 1 });
@@ -315,7 +335,11 @@ async function collectRelativePrefixes({
         ? objectKey.slice(normalizedRootPrefix.length)
         : objectKey;
 
-      if (relativeObjectKey) {
+      if (
+        relativeObjectKey &&
+        (!pathPattern ||
+          canRelativePathMatchPatternPrefix(relativeObjectKey, pathPattern))
+      ) {
         relativePaths.add(relativeObjectKey);
       }
     }
@@ -331,6 +355,30 @@ async function collectRelativePrefixes({
 
 function escapeRegExp(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function normalizePathPattern(pathPattern?: string) {
+  return (pathPattern ?? "").trim().replace(/^\/+|\/+$/g, "");
+}
+
+function getExactFilterValues(
+  selectedFilters: PrefixFilters,
+  ignoreKey?: string,
+) {
+  return Object.fromEntries(
+    Object.entries(selectedFilters)
+      .flatMap(([key, filter]) => {
+        if (
+          key === ignoreKey ||
+          filter.mode !== "values" ||
+          filter.values.length === 0
+        ) {
+          return [];
+        }
+
+        return [[key, [...filter.values]]];
+      }),
+  ) as Record<string, string[]>;
 }
 
 function inferHivePartitionsFromPrefixes(relativePrefixes: string[]) {
@@ -380,7 +428,7 @@ function inferHivePartitionsFromPrefixes(relativePrefixes: string[]) {
 }
 
 function compileCustomPathPattern(pathPattern: string) {
-  const normalizedPattern = pathPattern.trim().replace(/^\/+|\/+$/g, "");
+  const normalizedPattern = normalizePathPattern(pathPattern);
   const capturePattern = /\{(category|range):([A-Za-z_][A-Za-z0-9_]*)\}/g;
   const captures: Array<{ kind: FilterKind; key: string }> = [];
   let regexSource = "^";
@@ -403,6 +451,132 @@ function compileCustomPathPattern(pathPattern: string) {
     captures,
     normalizedPattern,
   };
+}
+
+function buildCustomPatternSegmentRegexes(pathPattern: string) {
+  const normalizedPattern = normalizePathPattern(pathPattern);
+
+  if (!normalizedPattern) {
+    return [];
+  }
+
+  return normalizedPattern
+    .split("/")
+    .filter(Boolean)
+    .map((segment) => {
+      const regexSource = segment.replace(
+        /\{(category|range):([A-Za-z_][A-Za-z0-9_]*)\}/g,
+        "[^/]+",
+      );
+      return new RegExp(`^${regexSource}$`);
+    });
+}
+
+function canRelativePathMatchPatternPrefix(relativePath: string, pathPattern: string) {
+  const segmentRegexes = buildCustomPatternSegmentRegexes(pathPattern);
+
+  if (segmentRegexes.length === 0) {
+    return true;
+  }
+
+  const segments = relativePath.replace(/\/+$/, "").split("/").filter(Boolean);
+
+  if (segments.length > segmentRegexes.length) {
+    return false;
+  }
+
+  return segments.every((segment, index) => segmentRegexes[index]?.test(segment));
+}
+
+function deriveDiscoveryPrefixes({
+  rootPrefix,
+  pathPattern,
+  selectedFilters,
+  ignoreFilterKey,
+}: {
+  rootPrefix: string;
+  pathPattern?: string;
+  selectedFilters: PrefixFilters;
+  ignoreFilterKey?: string;
+}) {
+  const normalizedRootPrefix = rootPrefix.trim();
+  const normalizedPattern = normalizePathPattern(pathPattern);
+
+  if (!normalizedPattern) {
+    return [normalizedRootPrefix];
+  }
+
+  const exactFilterValues = getExactFilterValues(selectedFilters, ignoreFilterKey);
+  const patternSegments = normalizedPattern.split("/").filter(Boolean);
+  let prefixes = [normalizedRootPrefix];
+
+  for (const segment of patternSegments) {
+    const capturePattern = /\{(category|range):([A-Za-z_][A-Za-z0-9_]*)\}/g;
+    const segmentVariants = [""];
+    let lastIndex = 0;
+    let unresolved = false;
+
+    for (const match of segment.matchAll(capturePattern)) {
+      const [fullMatch, , key] = match;
+      const matchIndex = match.index ?? 0;
+      const literal = segment.slice(lastIndex, matchIndex);
+
+      for (let index = 0; index < segmentVariants.length; index += 1) {
+        segmentVariants[index] += literal;
+      }
+
+      const values = exactFilterValues[key] ?? [];
+
+      if (values.length === 0) {
+        unresolved = true;
+        break;
+      }
+
+      const nextVariants: string[] = [];
+
+      for (const variant of segmentVariants) {
+        for (const value of values) {
+          nextVariants.push(`${variant}${value}`);
+
+          if (nextVariants.length >= maxDerivedDiscoveryPrefixes) {
+            break;
+          }
+        }
+
+        if (nextVariants.length >= maxDerivedDiscoveryPrefixes) {
+          break;
+        }
+      }
+
+      segmentVariants.splice(0, segmentVariants.length, ...nextVariants);
+      lastIndex = matchIndex + fullMatch.length;
+    }
+
+    if (segmentVariants.length === 0) {
+      return [normalizedRootPrefix];
+    }
+
+    if (unresolved) {
+      return [
+        ...new Set(
+          prefixes.flatMap((prefix) =>
+            segmentVariants.map((variant) => `${prefix}${variant}`),
+          ),
+        ),
+      ];
+    }
+
+    const trailingLiteral = segment.slice(lastIndex);
+    prefixes = [
+      ...new Set(
+        prefixes.flatMap((prefix) =>
+          segmentVariants.map((variant) => `${prefix}${variant}${trailingLiteral}/`),
+        ),
+      ),
+    ].slice(0, maxDerivedDiscoveryPrefixes);
+  }
+
+  return prefixes.length > 0 ? prefixes : [normalizedRootPrefix];
 }
 
 function inferCustomPartitionsFromPrefixes(
@@ -504,6 +678,55 @@ function extractCustomPartitionValue(
   return captureIndex >= 0 ? match[captureIndex + 1] ?? null : null;
 }
 
+function extractPartitionValue(
+  relativePath: string,
+  key: string,
+  pathPattern?: string,
+) {
+  const trimmedPattern = pathPattern?.trim() ?? "";
+
+  if (trimmedPattern) {
+    return extractCustomPartitionValue(relativePath, trimmedPattern, key);
+  }
+
+  return extractHivePartitionValue(relativePath, key);
+}
+
+function partitionValueMatchesFilter(
+  value: string | null,
+  filter: PrefixFilters[string],
+) {
+  if (!value) {
+    return false;
+  }
+
+  if (filter.mode === "values") {
+    return filter.values.includes(value);
+  }
+
+  const startsAfter = !filter.start || value >= filter.start;
+  const endsBefore = !filter.end || value <= filter.end;
+  return startsAfter && endsBefore;
+}
+
+function pathMatchesSelectedFilters(
+  relativePath: string,
+  pathPattern: string | undefined,
+  selectedFilters: PrefixFilters,
+  ignoreKey?: string,
+) {
+  return Object.entries(selectedFilters).every(([key, filter]) => {
+    if (key === ignoreKey) {
+      return true;
+    }
+
+    return partitionValueMatchesFilter(
+      extractPartitionValue(relativePath, key, pathPattern),
+      filter,
+    );
+  });
+}
+
 export async function searchPartitionValues({
   profile,
   bucket,
@@ -511,6 +734,7 @@ export async function searchPartitionValues({
   pathPattern,
   key,
   search,
+  selectedFilters,
   page,
   pageSize,
 }: {
@@ -520,13 +744,18 @@ export async function searchPartitionValues({
   pathPattern?: string;
   key: string;
   search: string;
+  selectedFilters?: PrefixFilters;
   page: number;
   pageSize: number;
 }) {
+  const normalizedSelectedFilters = normalizePrefixFilters(selectedFilters);
   const { relativePrefixes } = await collectRelativePrefixes({
     profile,
     bucket,
     rootPrefix,
+    pathPattern,
+    selectedFilters: normalizedSelectedFilters,
+    ignoreFilterKey: key,
     maxDepth: 6,
     maxKeysPerLevel: 250,
     maxPrefixesToVisit: 1000,
@@ -538,6 +767,17 @@ export async function searchPartitionValues({
   let customMatched = false;
 
   for (const relativePath of relativePrefixes) {
+    if (
+      !pathMatchesSelectedFilters(
+        relativePath,
+        trimmedPattern,
+        normalizedSelectedFilters,
+        key,
+      )
+    ) {
+      continue;
+    }
+
     let value: string | null = null;
 
     if (trimmedPattern) {
@@ -588,6 +828,7 @@ export async function inferPartitions({
   bucket,
   rootPrefix,
   pathPattern,
+  selectedFilters,
   maxDepth = 6,
   maxKeysPerLevel = 200,
   maxPrefixesToVisit = 500,
@@ -596,24 +837,35 @@ export async function inferPartitions({
   bucket: string;
   rootPrefix: string;
   pathPattern?: string;
+  selectedFilters?: PrefixFilters;
   maxDepth?: number;
   maxKeysPerLevel?: number;
   maxPrefixesToVisit?: number;
 }) {
+  const normalizedSelectedFilters = normalizePrefixFilters(selectedFilters);
   const { normalizedRootPrefix, relativePrefixes } = await collectRelativePrefixes({
     profile,
     bucket,
     rootPrefix,
+    pathPattern,
+    selectedFilters: normalizedSelectedFilters,
     maxDepth,
     maxKeysPerLevel,
     maxPrefixesToVisit,
   });
+  const scopedRelativePrefixes = relativePrefixes.filter((relativePath) =>
+    pathMatchesSelectedFilters(
+      relativePath,
+      pathPattern,
+      normalizedSelectedFilters,
+    ),
+  );
 
   const merged: PartitionDefinitionAccumulator = new Map();
-  const hivePartitions = inferHivePartitionsFromPrefixes(relativePrefixes);
+  const hivePartitions = inferHivePartitionsFromPrefixes(scopedRelativePrefixes);
   const trimmedPattern = pathPattern?.trim() ?? "";
   const customPartitions = trimmedPattern
-    ? inferCustomPartitionsFromPrefixes(relativePrefixes, trimmedPattern)
+    ? inferCustomPartitionsFromPrefixes(scopedRelativePrefixes, trimmedPattern)
     : [];
 
   const basePartitions =
