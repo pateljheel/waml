@@ -1,6 +1,7 @@
 import { inferPartitions } from "../../../../lib/aws";
 import { normalizePrefixFilters } from "@waml/shared";
 import { NextResponse } from "next/server";
+import { parseDiscoverySourceFromSearchParams } from "../route-helpers";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -8,15 +9,15 @@ export const revalidate = 0;
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
-  const profile = searchParams.get("profile");
+  const source = parseDiscoverySourceFromSearchParams(searchParams);
   const bucket = searchParams.get("bucket");
   const rootPrefix = searchParams.get("rootPrefix") ?? "";
   const pathPattern = searchParams.get("pathPattern") ?? "";
   const selectedFiltersParam = searchParams.get("selectedFilters") ?? "";
 
-  if (!profile || !bucket) {
+  if ((source.provider === "s3" && !source.awsProfile) || !bucket) {
     return NextResponse.json(
-      { error: "Missing required query parameters: profile and bucket" },
+      { error: "Missing required query parameters for partition inference" },
       { status: 400 },
     );
   }
@@ -26,13 +27,7 @@ export async function GET(request: Request) {
       ? normalizePrefixFilters(JSON.parse(selectedFiltersParam))
       : {};
     const result = await inferPartitions({
-      source: {
-        provider: "s3",
-        awsProfile: profile,
-        gcpProject: "",
-        authMode: "adc",
-        serviceAccountKeyPath: "",
-      },
+      source,
       bucket,
       rootPrefix,
       pathPattern,
@@ -47,9 +42,7 @@ export async function GET(request: Request) {
     return NextResponse.json(
       {
         error:
-          error instanceof Error
-            ? error.message
-            : "Failed to infer Hive partitions",
+          error instanceof Error ? error.message : "Failed to infer partitions",
       },
       {
         status: 500,

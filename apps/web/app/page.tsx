@@ -371,6 +371,33 @@ function getNotebookSourceSummary(notebook: Notebook) {
   return `${projectLabel} · gcs://${notebook.bucket}${root}`;
 }
 
+function buildDiscoveryQueryParams(notebook: Notebook) {
+  const searchParams = new URLSearchParams({
+    provider: notebook.provider,
+    bucket: notebook.bucket,
+    rootPrefix: notebook.rootPrefix,
+  });
+
+  if (notebook.provider === "s3") {
+    searchParams.set("awsProfile", notebook.awsProfile);
+  } else {
+    if (notebook.gcpProject.trim()) {
+      searchParams.set("gcpProject", notebook.gcpProject.trim());
+    }
+
+    searchParams.set("authMode", notebook.authMode);
+
+    if (notebook.serviceAccountKeyPath.trim()) {
+      searchParams.set(
+        "serviceAccountKeyPath",
+        notebook.serviceAccountKeyPath.trim(),
+      );
+    }
+  }
+
+  return searchParams;
+}
+
 function clonePrefixFilters(prefixFilters: PrefixFilters) {
   return Object.fromEntries(
     Object.entries(prefixFilters).map(([key, filter]) => [
@@ -429,6 +456,9 @@ export default function HomePage() {
 
   const activeNotebook =
     notebooks.find((notebook) => notebook.id === activeNotebookId) ?? notebooks[0];
+  const providerSupportsDiscovery =
+    activeNotebook.provider === "s3" || activeNotebook.provider === "gcs";
+  const providerSupportsSearch = activeNotebook.provider === "s3";
   const activePartitionFiltersJson = JSON.stringify(
     activeNotebook.partitionFilters ?? {},
   );
@@ -1437,7 +1467,10 @@ export default function HomePage() {
   }, [activeNotebook.provider, activeNotebook.awsProfile, activeNotebookId]);
 
   useEffect(() => {
-    if (!isS3Notebook(activeNotebook) || !activeNotebook.awsProfile) {
+    if (
+      !providerSupportsDiscovery ||
+      (activeNotebook.provider === "s3" && !activeNotebook.awsProfile)
+    ) {
       setAvailableBuckets([]);
       setBucketTotalPages(1);
       setBucketTotalItems(0);
@@ -1452,10 +1485,12 @@ export default function HomePage() {
       setAwsError(null);
 
       try {
+        const params = buildDiscoveryQueryParams(activeNotebook);
+        params.set("search", bucketSearch);
+        params.set("page", String(bucketPage));
+        params.set("pageSize", "12");
         const response = await fetch(
-          `/api/aws/buckets?profile=${encodeURIComponent(
-            activeNotebook.awsProfile,
-          )}&search=${encodeURIComponent(bucketSearch)}&page=${bucketPage}&pageSize=12`,
+          `/api/storage/buckets?${params.toString()}`,
           {
             cache: "no-store",
           },
@@ -1500,7 +1535,7 @@ export default function HomePage() {
       } catch (error) {
         if (!cancelled) {
           setAwsError(
-            error instanceof Error ? error.message : "Failed to load S3 buckets",
+            error instanceof Error ? error.message : "Failed to load buckets",
           );
           setAvailableBuckets([]);
           setBucketTotalPages(1);
@@ -1520,7 +1555,12 @@ export default function HomePage() {
     };
   }, [
     activeNotebook.provider,
+    providerSupportsDiscovery,
+    activeNotebook.provider,
     activeNotebook.awsProfile,
+    activeNotebook.gcpProject,
+    activeNotebook.authMode,
+    activeNotebook.serviceAccountKeyPath,
     activeNotebook.bucket,
     activeNotebookId,
     bucketPage,
@@ -1530,8 +1570,8 @@ export default function HomePage() {
 
   useEffect(() => {
     if (
-      !isS3Notebook(activeNotebook) ||
-      !activeNotebook.awsProfile ||
+      !providerSupportsDiscovery ||
+      (activeNotebook.provider === "s3" && !activeNotebook.awsProfile) ||
       !activeNotebook.bucket
     ) {
       setAvailablePrefixes([]);
@@ -1546,18 +1586,14 @@ export default function HomePage() {
       setAwsError(null);
 
       try {
+        const params = buildDiscoveryQueryParams(activeNotebook);
+        params.set("prefix", activeNotebook.rootPrefix);
+        params.set("maxKeys", "25");
+        if (prefixCursor) {
+          params.set("continuationToken", prefixCursor);
+        }
         const response = await fetch(
-          `/api/aws/prefixes?profile=${encodeURIComponent(
-            activeNotebook.awsProfile,
-          )}&bucket=${encodeURIComponent(
-            activeNotebook.bucket,
-          )}&prefix=${encodeURIComponent(
-            activeNotebook.rootPrefix,
-          )}&maxKeys=25${
-            prefixCursor
-              ? `&continuationToken=${encodeURIComponent(prefixCursor)}`
-              : ""
-          }`,
+          `/api/storage/prefixes?${params.toString()}`,
           {
             cache: "no-store",
           },
@@ -1579,7 +1615,7 @@ export default function HomePage() {
       } catch (error) {
         if (!cancelled) {
           setAwsError(
-            error instanceof Error ? error.message : "Failed to load S3 prefixes",
+            error instanceof Error ? error.message : "Failed to load prefixes",
           );
           setAvailablePrefixes([]);
           setNextPrefixCursor(null);
@@ -1597,7 +1633,12 @@ export default function HomePage() {
     };
   }, [
     activeNotebook.provider,
+    providerSupportsDiscovery,
+    activeNotebook.provider,
     activeNotebook.awsProfile,
+    activeNotebook.gcpProject,
+    activeNotebook.authMode,
+    activeNotebook.serviceAccountKeyPath,
     activeNotebook.bucket,
     activeNotebook.rootPrefix,
     activeNotebookId,
@@ -1606,8 +1647,8 @@ export default function HomePage() {
 
   useEffect(() => {
     if (
-      !isS3Notebook(activeNotebook) ||
-      !activeNotebook.awsProfile ||
+      !providerSupportsDiscovery ||
+      (activeNotebook.provider === "s3" && !activeNotebook.awsProfile) ||
       !activeNotebook.bucket
     ) {
       setPartitionDefinitions([]);
@@ -1621,16 +1662,11 @@ export default function HomePage() {
       setLoadingPartitions(true);
 
       try {
+        const params = buildDiscoveryQueryParams(activeNotebook);
+        params.set("pathPattern", activeNotebook.customPathPattern);
+        params.set("selectedFilters", activePartitionFiltersJson);
         const response = await fetch(
-          `/api/aws/partitions?profile=${encodeURIComponent(
-            activeNotebook.awsProfile,
-          )}&bucket=${encodeURIComponent(
-            activeNotebook.bucket,
-          )}&rootPrefix=${encodeURIComponent(
-            activeNotebook.rootPrefix,
-          )}&pathPattern=${encodeURIComponent(
-            activeNotebook.customPathPattern,
-          )}&selectedFilters=${encodeURIComponent(activePartitionFiltersJson)}`,
+          `/api/storage/partitions?${params.toString()}`,
           {
             cache: "no-store",
           },
@@ -1685,7 +1721,7 @@ export default function HomePage() {
       } catch (error) {
         if (!cancelled) {
           setAwsError(
-            error instanceof Error ? error.message : "Failed to infer Hive partitions",
+            error instanceof Error ? error.message : "Failed to infer partitions",
           );
           setPartitionDefinitions([]);
         }
@@ -1702,7 +1738,12 @@ export default function HomePage() {
     };
   }, [
     activeNotebook.provider,
+    providerSupportsDiscovery,
+    activeNotebook.provider,
     activeNotebook.awsProfile,
+    activeNotebook.gcpProject,
+    activeNotebook.authMode,
+    activeNotebook.serviceAccountKeyPath,
     activeNotebook.bucket,
     activeNotebook.rootPrefix,
     activeNotebook.customPathPattern,
@@ -1712,7 +1753,14 @@ export default function HomePage() {
 
   useEffect(() => {
     setBucketPage(1);
-  }, [bucketSearch, activeNotebook.provider, activeNotebook.awsProfile]);
+  }, [
+    bucketSearch,
+    activeNotebook.provider,
+    activeNotebook.awsProfile,
+    activeNotebook.gcpProject,
+    activeNotebook.authMode,
+    activeNotebook.serviceAccountKeyPath,
+  ]);
 
   useEffect(() => {
     setPrefixCursor(null);
@@ -1733,8 +1781,8 @@ export default function HomePage() {
 
     if (
       openKeys.length === 0 ||
-      !isS3Notebook(activeNotebook) ||
-      !activeNotebook.awsProfile ||
+      !providerSupportsDiscovery ||
+      (activeNotebook.provider === "s3" && !activeNotebook.awsProfile) ||
       !activeNotebook.bucket
     ) {
       return;
@@ -1752,20 +1800,15 @@ export default function HomePage() {
         }));
 
         try {
+          const params = buildDiscoveryQueryParams(activeNotebook);
+          params.set("pathPattern", activeNotebook.customPathPattern);
+          params.set("key", key);
+          params.set("search", state.search);
+          params.set("selectedFilters", activePartitionFiltersJson);
+          params.set("page", String(state.page));
+          params.set("pageSize", "25");
           const response = await fetch(
-            `/api/aws/partition-values?profile=${encodeURIComponent(
-              activeNotebook.awsProfile,
-            )}&bucket=${encodeURIComponent(
-              activeNotebook.bucket,
-            )}&rootPrefix=${encodeURIComponent(
-              activeNotebook.rootPrefix,
-            )}&pathPattern=${encodeURIComponent(
-              activeNotebook.customPathPattern,
-            )}&key=${encodeURIComponent(key)}&search=${encodeURIComponent(
-              state.search,
-            )}&selectedFilters=${encodeURIComponent(
-              activePartitionFiltersJson,
-            )}&page=${state.page}&pageSize=25`,
+            `/api/storage/partition-values?${params.toString()}`,
             {
               cache: "no-store",
               signal: controller.signal,
@@ -1816,8 +1859,12 @@ export default function HomePage() {
     };
   }, [
     partitionPickerQueryKey,
+    providerSupportsDiscovery,
     activeNotebook.provider,
     activeNotebook.awsProfile,
+    activeNotebook.gcpProject,
+    activeNotebook.authMode,
+    activeNotebook.serviceAccountKeyPath,
     activeNotebook.bucket,
     activeNotebook.rootPrefix,
     activeNotebook.customPathPattern,
@@ -1884,8 +1931,6 @@ export default function HomePage() {
       lineTimestamp: null,
       errors: [],
     };
-  const providerSupportsDiscovery = activeNotebook.provider === "s3";
-  const providerSupportsSearch = activeNotebook.provider === "s3";
   function getPartitionPicker(key: string): PartitionValuePickerState {
     return (
       partitionPickerState[key] ?? {
@@ -2412,33 +2457,78 @@ export default function HomePage() {
             <span className="field-state">
               {activeNotebook.provider === "s3"
                 ? "Current search and discovery implementation."
-                : "UI-only for now. GCS browsing and search arrive in later phases."}
+                : "Bucket and prefix discovery are enabled. Search execution arrives in a later phase."}
             </span>
           </div>
           {activeNotebook.provider === "s3" ? (
+            <div className="field field-profile">
+              <label htmlFor="aws-profile">AWS profile</label>
+              <select
+                className="control"
+                id="aws-profile"
+                value={activeNotebook.awsProfile}
+                onChange={(event) =>
+                  updateActiveNotebook("awsProfile", event.target.value)
+                }
+              >
+                {profileChoices.map((profile) => (
+                  <option key={profile} value={profile}>
+                    {profile}
+                  </option>
+                ))}
+              </select>
+              <span className="field-state">
+                {loadingProfiles
+                  ? "Loading profiles..."
+                  : `${activeNotebook.provider}://${activeNotebook.bucket}/${activeNotebook.rootPrefix}`}
+              </span>
+            </div>
+          ) : (
             <>
-          <div className="field field-profile">
-            <label htmlFor="aws-profile">AWS profile</label>
-            <select
-              className="control"
-              id="aws-profile"
-              value={activeNotebook.awsProfile}
-              onChange={(event) =>
-                updateActiveNotebook("awsProfile", event.target.value)
-              }
-            >
-              {profileChoices.map((profile) => (
-                <option key={profile} value={profile}>
-                  {profile}
-                </option>
-              ))}
-            </select>
-            <span className="field-state">
-              {loadingProfiles
-                ? "Loading profiles..."
-                : `${activeNotebook.provider}://${activeNotebook.bucket}/${activeNotebook.rootPrefix}`}
-            </span>
-          </div>
+              <div className="field field-profile">
+                <label htmlFor="gcp-project">GCP project</label>
+                <input
+                  id="gcp-project"
+                  value={activeNotebook.gcpProject}
+                  placeholder="Optional project id"
+                  onChange={(event) =>
+                    updateActiveNotebook("gcpProject", event.target.value)
+                  }
+                />
+                <span className="field-state">{`gcs://${activeNotebook.bucket}/${activeNotebook.rootPrefix}`}</span>
+              </div>
+              <div className="field search-root-hint">
+                <label htmlFor="gcs-auth-mode">GCS auth</label>
+                <select
+                  className="control"
+                  id="gcs-auth-mode"
+                  value={activeNotebook.authMode}
+                  onChange={(event) =>
+                    updateActiveNotebook("authMode", event.target.value as GcsAuthMode)
+                  }
+                >
+                  <option value="adc">Application Default Credentials</option>
+                  <option value="service_account">Service account key path</option>
+                </select>
+                <p className="field-state">
+                  Authentication wiring is not active yet. These settings are stored for the next provider phases.
+                </p>
+              </div>
+              {activeNotebook.authMode === "service_account" ? (
+                <div className="field search-root-hint">
+                  <label htmlFor="gcs-service-account-key-path">Service account key path</label>
+                  <input
+                    id="gcs-service-account-key-path"
+                    value={activeNotebook.serviceAccountKeyPath}
+                    placeholder="/path/to/service-account.json"
+                    onChange={(event) =>
+                      updateActiveNotebook("serviceAccountKeyPath", event.target.value)
+                    }
+                  />
+                </div>
+              ) : null}
+            </>
+          )}
           <div className="field field-bucket">
             <label>Bucket</label>
             <div className="picker" ref={bucketPickerRef}>
@@ -2449,6 +2539,7 @@ export default function HomePage() {
                   setBucketPickerOpen((open) => !open);
                   setPrefixPickerOpen(false);
                 }}
+                disabled={!providerSupportsDiscovery}
               >
                 <span>{activeNotebook.bucket || "Select bucket"}</span>
                 <span className="picker-chevron">▾</span>
@@ -2535,6 +2626,7 @@ export default function HomePage() {
                   setPrefixPickerOpen((open) => !open);
                   setBucketPickerOpen(false);
                 }}
+                disabled={!activeNotebook.bucket.trim()}
               >
                 <span>{activeNotebook.rootPrefix || "Select root prefix"}</span>
                 <span className="picker-chevron">▾</span>
@@ -2645,77 +2737,6 @@ export default function HomePage() {
               ) : null}
             </div>
           </div>
-            </>
-          ) : (
-            <>
-              <div className="field field-profile">
-                <label htmlFor="gcp-project">GCP project</label>
-                <input
-                  id="gcp-project"
-                  value={activeNotebook.gcpProject}
-                  placeholder="Optional project id"
-                  onChange={(event) =>
-                    updateActiveNotebook("gcpProject", event.target.value)
-                  }
-                />
-                <span className="field-state">
-                  {`gcs://${activeNotebook.bucket}/${activeNotebook.rootPrefix}`}
-                </span>
-              </div>
-              <div className="field field-bucket">
-                <label htmlFor="gcs-bucket">Bucket</label>
-                <input
-                  id="gcs-bucket"
-                  value={activeNotebook.bucket}
-                  placeholder="Enter bucket name"
-                  onChange={(event) =>
-                    updateActiveNotebook("bucket", event.target.value)
-                  }
-                />
-              </div>
-              <div className="field field-prefix">
-                <label htmlFor="gcs-root-prefix">Root prefix</label>
-                <input
-                  id="gcs-root-prefix"
-                  value={activeNotebook.rootPrefix}
-                  placeholder="Optional root prefix"
-                  onChange={(event) =>
-                    updateActiveNotebook("rootPrefix", event.target.value)
-                  }
-                />
-              </div>
-              <div className="field search-root-hint">
-                <label htmlFor="gcs-auth-mode">GCS auth</label>
-                <select
-                  className="control"
-                  id="gcs-auth-mode"
-                  value={activeNotebook.authMode}
-                  onChange={(event) =>
-                    updateActiveNotebook("authMode", event.target.value as GcsAuthMode)
-                  }
-                >
-                  <option value="adc">Application Default Credentials</option>
-                  <option value="service_account">Service account key path</option>
-                </select>
-                <p className="field-state">
-                  Authentication wiring is not active yet. These settings are stored for the next provider phases.
-                </p>
-              </div>
-              {activeNotebook.authMode === "service_account" ? (
-                <div className="field search-root-hint">
-                  <label htmlFor="gcs-service-account-key-path">Service account key path</label>
-                  <input
-                    id="gcs-service-account-key-path"
-                    value={activeNotebook.serviceAccountKeyPath}
-                    placeholder="/path/to/service-account.json"
-                    onChange={(event) =>
-                      updateActiveNotebook("serviceAccountKeyPath", event.target.value)
-                    }
-                  />
-                </div>
-              ) : null}
-            </>
-          )}
           {awsError ? (
             <div className="field search-root-hint">
               <p className="field-error">{awsError}</p>

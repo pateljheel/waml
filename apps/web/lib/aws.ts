@@ -1,6 +1,6 @@
 import "server-only";
 
-import type { PrefixFilters } from "@waml/shared";
+import type { NotebookSource, PrefixFilters } from "@waml/shared";
 import { normalizePrefixFilters } from "@waml/shared";
 import { createBrowserStorage, type BrowserStorage } from "./storage";
 export { createS3Client } from "./storage/s3";
@@ -107,11 +107,34 @@ async function createStorageForProfile(profile: string) {
   return createBrowserStorage({
     provider: "s3",
     awsProfile: profile,
+    gcpProject: "",
+    authMode: "adc",
+    serviceAccountKeyPath: "",
+  });
+}
+
+type DiscoverySourceInput = Pick<
+  NotebookSource,
+  "provider" | "awsProfile" | "gcpProject" | "authMode" | "serviceAccountKeyPath"
+>;
+
+async function createStorageForSource(source: DiscoverySourceInput) {
+  return createBrowserStorage({
+    provider: source.provider,
+    awsProfile: source.awsProfile,
+    gcpProject: source.gcpProject,
+    authMode: source.authMode,
+    serviceAccountKeyPath: source.serviceAccountKeyPath,
   });
 }
 
 export async function listBucketsForProfile(profile: string) {
   const storage = await createStorageForProfile(profile);
+  return storage.listBuckets();
+}
+
+export async function listBucketsForSource(source: DiscoverySourceInput) {
+  const storage = await createStorageForSource(source);
   return storage.listBuckets();
 }
 
@@ -148,6 +171,39 @@ export async function searchBucketsForProfile({
   };
 }
 
+export async function searchBucketsForSource({
+  source,
+  search,
+  page,
+  pageSize,
+}: {
+  source: DiscoverySourceInput;
+  search: string;
+  page: number;
+  pageSize: number;
+}) {
+  const buckets = await listBucketsForSource(source);
+  const normalizedSearch = search.trim().toLowerCase();
+  const filteredBuckets = normalizedSearch
+    ? buckets.filter((bucket) => bucket.toLowerCase().includes(normalizedSearch))
+    : buckets;
+
+  const total = filteredBuckets.length;
+  const safePageSize = Math.max(1, pageSize);
+  const totalPages = Math.max(1, Math.ceil(total / safePageSize));
+  const safePage = Math.min(Math.max(1, page), totalPages);
+  const startIndex = (safePage - 1) * safePageSize;
+
+  return {
+    buckets: filteredBuckets.slice(startIndex, startIndex + safePageSize),
+    search: normalizedSearch,
+    page: safePage,
+    pageSize: safePageSize,
+    total,
+    totalPages,
+  };
+}
+
 export async function listPrefixesForBucket({
   profile,
   bucket,
@@ -162,6 +218,39 @@ export async function listPrefixesForBucket({
   maxKeys: number;
 }) {
   const storage = await createStorageForProfile(profile);
+  const normalizedPrefix = prefix.trim();
+  const response = await storage.listObjects({
+    bucket,
+    prefix: normalizedPrefix,
+    delimiter: "/",
+    continuationToken,
+    maxKeys,
+  });
+
+  return {
+    normalizedPrefix,
+    prefixes: [...response.commonPrefixes].sort((left, right) =>
+      left.localeCompare(right),
+    ),
+    nextContinuationToken: response.nextContinuationToken,
+    isTruncated: response.isTruncated,
+  };
+}
+
+export async function listPrefixesForSource({
+  source,
+  bucket,
+  prefix,
+  continuationToken,
+  maxKeys,
+}: {
+  source: DiscoverySourceInput;
+  bucket: string;
+  prefix: string;
+  continuationToken?: string;
+  maxKeys: number;
+}) {
+  const storage = await createStorageForSource(source);
   const normalizedPrefix = prefix.trim();
   const response = await storage.listObjects({
     bucket,
@@ -236,7 +325,7 @@ async function listAllChildrenForBucketLevel({
 }
 
 async function collectRelativePrefixes({
-  profile,
+  source,
   bucket,
   rootPrefix,
   pathPattern,
@@ -246,7 +335,7 @@ async function collectRelativePrefixes({
   maxKeysPerLevel = 200,
   maxPrefixesToVisit = 500,
 }: {
-  profile: string;
+  source: DiscoverySourceInput;
   bucket: string;
   rootPrefix: string;
   pathPattern?: string;
@@ -256,7 +345,7 @@ async function collectRelativePrefixes({
   maxKeysPerLevel?: number;
   maxPrefixesToVisit?: number;
 }) {
-  const storage = await createStorageForProfile(profile);
+  const storage = await createStorageForSource(source);
   const normalizedRootPrefix = rootPrefix.trim();
   const relativePaths = new Set<string>();
   const queue: Array<{ prefix: string; depth: number }> = deriveDiscoveryPrefixes({
@@ -705,7 +794,7 @@ function pathMatchesSelectedFilters(
 }
 
 export async function searchPartitionValues({
-  profile,
+  source,
   bucket,
   rootPrefix,
   pathPattern,
@@ -715,7 +804,7 @@ export async function searchPartitionValues({
   page,
   pageSize,
 }: {
-  profile: string;
+  source: DiscoverySourceInput;
   bucket: string;
   rootPrefix: string;
   pathPattern?: string;
@@ -727,7 +816,7 @@ export async function searchPartitionValues({
 }) {
   const normalizedSelectedFilters = normalizePrefixFilters(selectedFilters);
   const { relativePrefixes } = await collectRelativePrefixes({
-    profile,
+    source,
     bucket,
     rootPrefix,
     pathPattern,
@@ -801,7 +890,7 @@ export async function searchPartitionValues({
 }
 
 export async function inferPartitions({
-  profile,
+  source,
   bucket,
   rootPrefix,
   pathPattern,
@@ -810,7 +899,7 @@ export async function inferPartitions({
   maxKeysPerLevel = 200,
   maxPrefixesToVisit = 500,
 }: {
-  profile: string;
+  source: DiscoverySourceInput;
   bucket: string;
   rootPrefix: string;
   pathPattern?: string;
@@ -821,7 +910,7 @@ export async function inferPartitions({
 }) {
   const normalizedSelectedFilters = normalizePrefixFilters(selectedFilters);
   const { normalizedRootPrefix, relativePrefixes } = await collectRelativePrefixes({
-    profile,
+    source,
     bucket,
     rootPrefix,
     pathPattern,

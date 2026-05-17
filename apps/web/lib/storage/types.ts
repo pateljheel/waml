@@ -18,6 +18,7 @@ export type BrowserStorage = {
   }): Promise<BrowserStorageListResult>;
 };
 
-export type BrowserStorageFactoryInput =
-  | Pick<NotebookSource, "provider" | "awsProfile">
-  | { provider: "s3"; awsProfile: string };
+export type BrowserStorageFactoryInput = Pick<
+  NotebookSource,
+  "provider" | "awsProfile" | "gcpProject" | "authMode" | "serviceAccountKeyPath"
+>;

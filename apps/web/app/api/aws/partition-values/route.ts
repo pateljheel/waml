@@ -35,7 +35,13 @@ export async function GET(request: Request) {
       ? normalizePrefixFilters(JSON.parse(selectedFiltersParam))
       : {};
     const result = await searchPartitionValues({
-      profile,
+      source: {
+        provider: "s3",
+        awsProfile: profile,
+        gcpProject: "",
+        authMode: "adc",
+        serviceAccountKeyPath: "",
+      },
       bucket,
       rootPrefix,
       pathPattern,
