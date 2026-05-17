@@ -22,7 +22,11 @@ export const searchOptionsSchema = z.object({
 
 export type SearchOptions = z.infer<typeof searchOptionsSchema>;
 
+export const storageProviderSchema = z.enum(["s3"]);
+export type StorageProvider = z.infer<typeof storageProviderSchema>;
+
 export const notebookSourceSchema = z.object({
+  provider: storageProviderSchema.default("s3"),
   awsProfile: z.string().min(1),
   bucket: z.string().min(1),
   rootPrefix: z.string().default(""),

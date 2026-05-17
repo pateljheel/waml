@@ -38,6 +38,7 @@ async function readCachedTextArtifact(filepath: string) {
 }
 
 async function loadContextFromCache({
+  provider,
   bucket,
   objectKey,
   etag,
@@ -45,6 +46,7 @@ async function loadContextFromCache({
   before,
   after,
 }: {
+  provider: "s3";
   bucket: string;
   objectKey: string;
   etag: string;
@@ -56,7 +58,7 @@ async function loadContextFromCache({
     return null;
   }
 
-  const chunks = listCacheChunksForObject(bucket, objectKey, etag).filter(
+  const chunks = listCacheChunksForObject(provider, bucket, objectKey, etag).filter(
     (chunk) => chunk.textCachePath,
   );
 
@@ -267,6 +269,7 @@ export async function GET(
 
   const cachedLines =
     (await loadContextFromCache({
+      provider: job.source.provider,
       bucket: job.source.bucket,
       objectKey,
       etag,

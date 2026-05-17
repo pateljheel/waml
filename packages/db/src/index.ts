@@ -10,6 +10,7 @@ import type {
   SearchMatch,
   SearchJobEventType,
   SearchJobStatus,
+  StorageProvider,
 } from "@waml/shared";
 import { normalizePrefixFilters } from "@waml/shared";
 
@@ -77,6 +78,7 @@ type JobRow = {
 
 type ChunkRow = {
   chunk_pk: string;
+  provider: StorageProvider;
   bucket: string;
   object_key: string;
   etag: string;
@@ -97,6 +99,7 @@ type ChunkRow = {
 };
 
 type ManifestScopeRow = {
+  provider: StorageProvider;
   bucket: string;
   root_prefix: string;
   scope_prefix: string;
@@ -105,6 +108,7 @@ type ManifestScopeRow = {
 };
 
 type ManifestObjectRow = {
+  provider: StorageProvider;
   bucket: string;
   root_prefix: string;
   scope_prefix: string;
@@ -118,6 +122,7 @@ type ManifestObjectRow = {
 
 export type CacheChunkRecord = {
   chunkPk: string;
+  provider: StorageProvider;
   bucket: string;
   objectKey: string;
   etag: string;
@@ -146,6 +151,7 @@ export type UpsertCacheChunkInput = Omit<
 };
 
 export type ManifestScopeRecord = {
+  provider: StorageProvider;
   bucket: string;
   rootPrefix: string;
   scopePrefix: string;
@@ -154,6 +160,7 @@ export type ManifestScopeRecord = {
 };
 
 export type ManifestObjectRecord = {
+  provider: StorageProvider;
   bucket: string;
   rootPrefix: string;
   scopePrefix: string;
@@ -272,15 +279,17 @@ export function initializeDatabase() {
     );
 
     CREATE TABLE IF NOT EXISTS manifest_scopes (
+      provider TEXT NOT NULL DEFAULT 's3',
       bucket TEXT NOT NULL,
       root_prefix TEXT NOT NULL,
       scope_prefix TEXT NOT NULL,
       last_refreshed_at TEXT NOT NULL,
       object_count INTEGER NOT NULL DEFAULT 0,
-      PRIMARY KEY (bucket, root_prefix, scope_prefix)
+      PRIMARY KEY (provider, bucket, root_prefix, scope_prefix)
     );
 
     CREATE TABLE IF NOT EXISTS manifest_objects (
+      provider TEXT NOT NULL DEFAULT 's3',
       bucket TEXT NOT NULL,
       root_prefix TEXT NOT NULL,
       scope_prefix TEXT NOT NULL,
@@ -290,14 +299,15 @@ export function initializeDatabase() {
       last_modified TEXT NOT NULL DEFAULT '',
       discovered_at TEXT NOT NULL,
       last_seen_at TEXT NOT NULL,
-      PRIMARY KEY (bucket, root_prefix, scope_prefix, object_key)
+      PRIMARY KEY (provider, bucket, root_prefix, scope_prefix, object_key)
     );
 
     CREATE INDEX IF NOT EXISTS idx_manifest_objects_scope_order
-      ON manifest_objects (bucket, root_prefix, scope_prefix, object_key);
+      ON manifest_objects (provider, bucket, root_prefix, scope_prefix, object_key);
 
     CREATE TABLE IF NOT EXISTS chunks (
       chunk_pk TEXT PRIMARY KEY,
+      provider TEXT NOT NULL DEFAULT 's3',
       bucket TEXT NOT NULL DEFAULT '',
       object_key TEXT NOT NULL,
       etag TEXT NOT NULL,
@@ -386,6 +396,19 @@ export function initializeDatabase() {
     "scan_continuation_token TEXT NOT NULL DEFAULT ''",
   );
   ensureColumn(db, "chunks", "bucket", "bucket TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, "chunks", "provider", "provider TEXT NOT NULL DEFAULT 's3'");
+  ensureColumn(
+    db,
+    "manifest_scopes",
+    "provider",
+    "provider TEXT NOT NULL DEFAULT 's3'",
+  );
+  ensureColumn(
+    db,
+    "manifest_objects",
+    "provider",
+    "provider TEXT NOT NULL DEFAULT 's3'",
+  );
   ensureColumn(
     db,
     "chunks",
@@ -409,6 +432,7 @@ export function initializeDatabase() {
 function mapChunkRow(row: ChunkRow): CacheChunkRecord {
   return {
     chunkPk: row.chunk_pk,
+    provider: row.provider,
     bucket: row.bucket,
     objectKey: row.object_key,
     etag: row.etag,
@@ -431,6 +455,7 @@ function mapChunkRow(row: ChunkRow): CacheChunkRecord {
 
 function mapManifestScopeRow(row: ManifestScopeRow): ManifestScopeRecord {
   return {
+    provider: row.provider,
     bucket: row.bucket,
     rootPrefix: row.root_prefix,
     scopePrefix: row.scope_prefix,
@@ -441,6 +466,7 @@ function mapManifestScopeRow(row: ManifestScopeRow): ManifestScopeRecord {
 
 function mapManifestObjectRow(row: ManifestObjectRow): ManifestObjectRecord {
   return {
+    provider: row.provider,
     bucket: row.bucket,
     rootPrefix: row.root_prefix,
     scopePrefix: row.scope_prefix,
@@ -474,6 +500,7 @@ function normalizeStatus(status: string): SearchJobStatus {
 }
 
 function mapJobRow(row: JobRow): SearchJob {
+  const rawSource = JSON.parse(row.source_json || "{}") as Partial<SearchJob["source"]>;
   return {
     id: row.id,
     notebookId: row.notebook_id,
@@ -485,7 +512,12 @@ function mapJobRow(row: JobRow): SearchJob {
     timeConfig: JSON.parse(row.time_config_json || "{}") as SearchJob["timeConfig"],
     startTime: row.start_time,
     endTime: row.end_time,
-    source: JSON.parse(row.source_json) as SearchJob["source"],
+    source: {
+      provider: rawSource.provider ?? "s3",
+      awsProfile: rawSource.awsProfile ?? "",
+      bucket: rawSource.bucket ?? "",
+      rootPrefix: rawSource.rootPrefix ?? "",
+    },
     prefixFilters: normalizePrefixFilters(JSON.parse(row.prefix_filters_json || "{}")),
     customPathPattern: row.custom_path_pattern ?? "",
     status: normalizeStatus(row.status),
@@ -525,7 +557,12 @@ export function createJob(input: CreateSearchJobInput): SearchJob {
     },
     startTime: input.startTime ?? "",
     endTime: input.endTime ?? "",
-    source: input.source,
+    source: {
+      provider: input.source.provider ?? "s3",
+      awsProfile: input.source.awsProfile,
+      bucket: input.source.bucket,
+      rootPrefix: input.source.rootPrefix,
+    },
     prefixFilters: normalizePrefixFilters(input.prefixFilters),
     customPathPattern: input.customPathPattern ?? "",
     status: "queued",
@@ -1011,6 +1048,7 @@ export function getCacheChunk(chunkPk: string) {
 }
 
 export function listCacheChunksForObject(
+  provider: StorageProvider,
   bucket: string,
   objectKey: string,
   etag: string,
@@ -1019,10 +1057,10 @@ export function listCacheChunksForObject(
   const rows = db
     .prepare(
       `SELECT * FROM chunks
-       WHERE bucket = ? AND object_key = ? AND etag = ?
+       WHERE provider = ? AND bucket = ? AND object_key = ? AND etag = ?
        ORDER BY CAST(chunk_id AS INTEGER) ASC, created_at ASC`,
     )
-    .all(bucket, objectKey, etag) as ChunkRow[];
+    .all(provider, bucket, objectKey, etag) as ChunkRow[];
 
   return rows.map(mapChunkRow);
 }
@@ -1035,18 +1073,19 @@ export function upsertCacheChunk(input: UpsertCacheChunkInput) {
 
   db.prepare(
     `INSERT INTO chunks (
-      chunk_pk, bucket, object_key, etag, chunk_id, byte_start, byte_end,
+      chunk_pk, provider, bucket, object_key, etag, chunk_id, byte_start, byte_end,
       start_line_number, end_line_number,
       artifact_path, text_cache_path, cache_size_bytes, trigram_count, line_count,
       min_timestamp_ms, max_timestamp_ms, created_at, last_accessed_at
     ) VALUES (
-      @chunkPk, @bucket, @objectKey, @etag, @chunkId, @byteStart, @byteEnd,
+      @chunkPk, @provider, @bucket, @objectKey, @etag, @chunkId, @byteStart, @byteEnd,
       @startLineNumber, @endLineNumber,
       @artifactPath, @textCachePath, @cacheSizeBytes, @trigramCount, @lineCount,
       @minTimestampMs, @maxTimestampMs,
       @createdAt, @lastAccessedAt
     )
     ON CONFLICT(chunk_pk) DO UPDATE SET
+      provider = excluded.provider,
       bucket = excluded.bucket,
       object_key = excluded.object_key,
       etag = excluded.etag,
@@ -1065,6 +1104,7 @@ export function upsertCacheChunk(input: UpsertCacheChunkInput) {
       last_accessed_at = excluded.last_accessed_at`,
   ).run({
     chunkPk: input.chunkPk,
+    provider: input.provider,
     bucket: input.bucket,
     objectKey: input.objectKey,
     etag: input.etag,
@@ -1132,11 +1172,12 @@ export function deleteCacheChunk(chunkPk: string) {
 }
 
 export function deleteCacheChunksForObject(
+  provider: StorageProvider,
   bucket: string,
   objectKey: string,
   etag: string,
 ) {
-  const existing = listCacheChunksForObject(bucket, objectKey, etag);
+  const existing = listCacheChunksForObject(provider, bucket, objectKey, etag);
 
   if (existing.length === 0) {
     return [];
@@ -1144,35 +1185,43 @@ export function deleteCacheChunksForObject(
 
   const db = initializeDatabase();
   db.prepare(
-    "DELETE FROM chunks WHERE bucket = ? AND object_key = ? AND etag = ?",
-  ).run(bucket, objectKey, etag);
+    "DELETE FROM chunks WHERE provider = ? AND bucket = ? AND object_key = ? AND etag = ?",
+  ).run(provider, bucket, objectKey, etag);
   return existing;
 }
 
-export function listCacheChunksBySourcePrefix(bucket: string, rootPrefix: string) {
+export function listCacheChunksBySourcePrefix(
+  provider: StorageProvider,
+  bucket: string,
+  rootPrefix: string,
+) {
   const db = initializeDatabase();
   const normalizedPrefix = rootPrefix.trim();
   const rows = normalizedPrefix
     ? (db
         .prepare(
           `SELECT * FROM chunks
-           WHERE bucket = ? AND object_key LIKE ?
+           WHERE provider = ? AND bucket = ? AND object_key LIKE ?
            ORDER BY last_accessed_at ASC, created_at ASC`,
         )
-        .all(bucket, `${normalizedPrefix}%`) as ChunkRow[])
+        .all(provider, bucket, `${normalizedPrefix}%`) as ChunkRow[])
     : (db
         .prepare(
           `SELECT * FROM chunks
-           WHERE bucket = ?
+           WHERE provider = ? AND bucket = ?
            ORDER BY last_accessed_at ASC, created_at ASC`,
         )
-        .all(bucket) as ChunkRow[]);
+        .all(provider, bucket) as ChunkRow[]);
 
   return rows.map(mapChunkRow);
 }
 
-export function deleteCacheChunksBySourcePrefix(bucket: string, rootPrefix: string) {
-  const existing = listCacheChunksBySourcePrefix(bucket, rootPrefix);
+export function deleteCacheChunksBySourcePrefix(
+  provider: StorageProvider,
+  bucket: string,
+  rootPrefix: string,
+) {
+  const existing = listCacheChunksBySourcePrefix(provider, bucket, rootPrefix);
 
   if (existing.length === 0) {
     return [];
@@ -1183,16 +1232,20 @@ export function deleteCacheChunksBySourcePrefix(bucket: string, rootPrefix: stri
 
   if (normalizedPrefix) {
     db.prepare(
-      "DELETE FROM chunks WHERE bucket = ? AND object_key LIKE ?",
-    ).run(bucket, `${normalizedPrefix}%`);
+      "DELETE FROM chunks WHERE provider = ? AND bucket = ? AND object_key LIKE ?",
+    ).run(provider, bucket, `${normalizedPrefix}%`);
   } else {
-    db.prepare("DELETE FROM chunks WHERE bucket = ?").run(bucket);
+    db.prepare("DELETE FROM chunks WHERE provider = ? AND bucket = ?").run(
+      provider,
+      bucket,
+    );
   }
 
   return existing;
 }
 
 export function getManifestScope(
+  provider: StorageProvider,
   bucket: string,
   rootPrefix: string,
   scopePrefix: string,
@@ -1201,14 +1254,15 @@ export function getManifestScope(
   const row = db
     .prepare(
       `SELECT * FROM manifest_scopes
-       WHERE bucket = ? AND root_prefix = ? AND scope_prefix = ?`,
+       WHERE provider = ? AND bucket = ? AND root_prefix = ? AND scope_prefix = ?`,
     )
-    .get(bucket, rootPrefix, scopePrefix) as ManifestScopeRow | undefined;
+    .get(provider, bucket, rootPrefix, scopePrefix) as ManifestScopeRow | undefined;
 
   return row ? mapManifestScopeRow(row) : null;
 }
 
 export function listManifestObjects(
+  provider: StorageProvider,
   bucket: string,
   rootPrefix: string,
   scopePrefix: string,
@@ -1217,21 +1271,23 @@ export function listManifestObjects(
   const rows = db
     .prepare(
       `SELECT * FROM manifest_objects
-       WHERE bucket = ? AND root_prefix = ? AND scope_prefix = ?
+       WHERE provider = ? AND bucket = ? AND root_prefix = ? AND scope_prefix = ?
        ORDER BY object_key ASC`,
     )
-    .all(bucket, rootPrefix, scopePrefix) as ManifestObjectRow[];
+    .all(provider, bucket, rootPrefix, scopePrefix) as ManifestObjectRow[];
 
   return rows.map(mapManifestObjectRow);
 }
 
 export function replaceManifestScopeObjects({
+  provider,
   bucket,
   rootPrefix,
   scopePrefix,
   objects,
   refreshedAt,
 }: {
+  provider: StorageProvider;
   bucket: string;
   rootPrefix: string;
   scopePrefix: string;
@@ -1247,29 +1303,27 @@ export function replaceManifestScopeObjects({
   const now = refreshedAt ?? new Date().toISOString();
   const deleteObjects = db.prepare(
     `DELETE FROM manifest_objects
-     WHERE bucket = ? AND root_prefix = ? AND scope_prefix = ?`,
+     WHERE provider = ? AND bucket = ? AND root_prefix = ? AND scope_prefix = ?`,
   );
   const insertObject = db.prepare(
     `INSERT INTO manifest_objects (
-      bucket, root_prefix, scope_prefix, object_key, etag, size, last_modified, discovered_at, last_seen_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      provider, bucket, root_prefix, scope_prefix, object_key, etag, size, last_modified, discovered_at, last_seen_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
   const upsertScope = db.prepare(
-    `INSERT INTO manifest_scopes (
-      bucket, root_prefix, scope_prefix, last_refreshed_at, object_count
-    ) VALUES (?, ?, ?, ?, ?)
-    ON CONFLICT(bucket, root_prefix, scope_prefix) DO UPDATE SET
-      last_refreshed_at = excluded.last_refreshed_at,
-      object_count = excluded.object_count`,
+    `INSERT OR REPLACE INTO manifest_scopes (
+      provider, bucket, root_prefix, scope_prefix, last_refreshed_at, object_count
+    ) VALUES (?, ?, ?, ?, ?, ?)`,
   );
 
   db.exec("BEGIN");
 
   try {
-    deleteObjects.run(bucket, rootPrefix, scopePrefix);
+    deleteObjects.run(provider, bucket, rootPrefix, scopePrefix);
 
     for (const object of objects) {
       insertObject.run(
+        provider,
         bucket,
         rootPrefix,
         scopePrefix,
@@ -1282,31 +1336,39 @@ export function replaceManifestScopeObjects({
       );
     }
 
-    upsertScope.run(bucket, rootPrefix, scopePrefix, now, objects.length);
+    upsertScope.run(provider, bucket, rootPrefix, scopePrefix, now, objects.length);
     db.exec("COMMIT");
   } catch (error) {
     db.exec("ROLLBACK");
     throw error;
   }
 
-  return getManifestScope(bucket, rootPrefix, scopePrefix);
+  return getManifestScope(provider, bucket, rootPrefix, scopePrefix);
 }
 
-export function listManifestScopesBySourcePrefix(bucket: string, rootPrefix: string) {
+export function listManifestScopesBySourcePrefix(
+  provider: StorageProvider,
+  bucket: string,
+  rootPrefix: string,
+) {
   const db = initializeDatabase();
   const rows = db
     .prepare(
       `SELECT * FROM manifest_scopes
-       WHERE bucket = ? AND root_prefix = ?
+       WHERE provider = ? AND bucket = ? AND root_prefix = ?
        ORDER BY scope_prefix ASC`,
     )
-    .all(bucket, rootPrefix) as ManifestScopeRow[];
+    .all(provider, bucket, rootPrefix) as ManifestScopeRow[];
 
   return rows.map(mapManifestScopeRow);
 }
 
-export function deleteManifestBySourcePrefix(bucket: string, rootPrefix: string) {
-  const scopes = listManifestScopesBySourcePrefix(bucket, rootPrefix);
+export function deleteManifestBySourcePrefix(
+  provider: StorageProvider,
+  bucket: string,
+  rootPrefix: string,
+) {
+  const scopes = listManifestScopesBySourcePrefix(provider, bucket, rootPrefix);
 
   if (scopes.length === 0) {
     return { removedScopes: 0, removedObjects: 0 };
@@ -1317,22 +1379,22 @@ export function deleteManifestBySourcePrefix(bucket: string, rootPrefix: string)
     .prepare(
       `SELECT COUNT(*) AS total
        FROM manifest_objects
-       WHERE bucket = ? AND root_prefix = ?`,
+       WHERE provider = ? AND bucket = ? AND root_prefix = ?`,
     )
-    .get(bucket, rootPrefix) as { total: number };
+    .get(provider, bucket, rootPrefix) as { total: number };
 
   db.exec("BEGIN");
 
   try {
     db.prepare(
       `DELETE FROM manifest_objects
-       WHERE bucket = ? AND root_prefix = ?`,
-    ).run(bucket, rootPrefix);
+       WHERE provider = ? AND bucket = ? AND root_prefix = ?`,
+    ).run(provider, bucket, rootPrefix);
 
     db.prepare(
       `DELETE FROM manifest_scopes
-       WHERE bucket = ? AND root_prefix = ?`,
-    ).run(bucket, rootPrefix);
+       WHERE provider = ? AND bucket = ? AND root_prefix = ?`,
+    ).run(provider, bucket, rootPrefix);
 
     db.exec("COMMIT");
   } catch (error) {

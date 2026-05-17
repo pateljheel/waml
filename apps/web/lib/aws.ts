@@ -1,13 +1,9 @@
 import "server-only";
 
-import {
-  ListBucketsCommand,
-  ListObjectsV2Command,
-  S3Client,
-} from "@aws-sdk/client-s3";
-import { fromIni } from "@aws-sdk/credential-providers";
 import type { PrefixFilters } from "@waml/shared";
 import { normalizePrefixFilters } from "@waml/shared";
+import { createBrowserStorage, type BrowserStorage } from "./storage";
+export { createS3Client } from "./storage/s3";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -107,84 +103,16 @@ function getProfileRegion(profile: string, configSections: IniSectionMap) {
   );
 }
 
-function createDynamicIniCredentialsProvider(profile: string) {
-  return async () => {
-    const provider = fromIni({ profile });
-    const credentials = await provider();
-    return {
-      ...credentials,
-    };
-  };
-}
-
-function isRetryableCredentialError(error: unknown) {
-  if (!error || typeof error !== "object") {
-    return false;
-  }
-
-  const candidate = error as {
-    name?: string;
-    Code?: string;
-    code?: string;
-    message?: string;
-  };
-  const code = candidate.name ?? candidate.Code ?? candidate.code ?? "";
-  const message = candidate.message ?? "";
-
-  return (
-    code === "ExpiredToken" ||
-    code === "InvalidAccessKeyId" ||
-    code === "RequestExpired" ||
-    code === "CredentialsProviderError" ||
-    message.includes("ExpiredToken") ||
-    message.includes("InvalidAccessKeyId") ||
-    message.includes("The security token included in the request is expired")
-  );
-}
-
-export async function createS3Client(profile: string) {
-  const configContent = await readIfPresent(configPath);
-  const configSections = parseIniSections(configContent);
-  const region = getProfileRegion(profile, configSections);
-
-  return new S3Client({
-    region,
-    credentials: createDynamicIniCredentialsProvider(profile),
+async function createStorageForProfile(profile: string) {
+  return createBrowserStorage({
+    provider: "s3",
+    awsProfile: profile,
   });
-}
-
-async function sendWithCredentialRefresh<T>({
-  clientRef,
-  profile,
-  operation,
-}: {
-  clientRef: { current: S3Client };
-  profile: string;
-  operation: (client: S3Client) => Promise<T>;
-}) {
-  try {
-    return await operation(clientRef.current);
-  } catch (error) {
-    if (!isRetryableCredentialError(error)) {
-      throw error;
-    }
-
-    clientRef.current = await createS3Client(profile);
-    return operation(clientRef.current);
-  }
 }
 
 export async function listBucketsForProfile(profile: string) {
-  const clientRef = { current: await createS3Client(profile) };
-  const response = await sendWithCredentialRefresh({
-    clientRef,
-    profile,
-    operation: (client) => client.send(new ListBucketsCommand({})),
-  });
-  return (response.Buckets ?? [])
-    .map((bucket) => bucket.Name)
-    .filter((name): name is string => Boolean(name))
-    .sort((left, right) => left.localeCompare(right));
+  const storage = await createStorageForProfile(profile);
+  return storage.listBuckets();
 }
 
 export async function searchBucketsForProfile({
@@ -233,32 +161,23 @@ export async function listPrefixesForBucket({
   continuationToken?: string;
   maxKeys: number;
 }) {
-  const clientRef = { current: await createS3Client(profile) };
+  const storage = await createStorageForProfile(profile);
   const normalizedPrefix = prefix.trim();
-
-  const response = await sendWithCredentialRefresh({
-    clientRef,
-    profile,
-    operation: (client) =>
-      client.send(
-        new ListObjectsV2Command({
-          Bucket: bucket,
-          Prefix: normalizedPrefix,
-          Delimiter: "/",
-          ContinuationToken: continuationToken || undefined,
-          MaxKeys: maxKeys,
-        }),
-      ),
+  const response = await storage.listObjects({
+    bucket,
+    prefix: normalizedPrefix,
+    delimiter: "/",
+    continuationToken,
+    maxKeys,
   });
 
   return {
     normalizedPrefix,
-    prefixes: (response.CommonPrefixes ?? [])
-      .map((entry) => entry.Prefix)
-      .filter((value): value is string => Boolean(value))
-      .sort((left, right) => left.localeCompare(right)),
-    nextContinuationToken: response.NextContinuationToken ?? null,
-    isTruncated: response.IsTruncated ?? false,
+    prefixes: [...response.commonPrefixes].sort((left, right) =>
+      left.localeCompare(right),
+    ),
+    nextContinuationToken: response.nextContinuationToken,
+    isTruncated: response.isTruncated,
   };
 }
 
@@ -276,14 +195,12 @@ type PartitionDefinitionAccumulator = Map<
 const maxDerivedDiscoveryPrefixes = 16;
 
 async function listAllChildrenForBucketLevel({
-  clientRef,
-  profile,
+  storage,
   bucket,
   prefix,
   maxKeys,
 }: {
-  clientRef: { current: S3Client };
-  profile: string;
+  storage: BrowserStorage;
   bucket: string;
   prefix: string;
   maxKeys: number;
@@ -293,35 +210,23 @@ async function listAllChildrenForBucketLevel({
   let continuationToken: string | undefined;
 
   do {
-    const response = await sendWithCredentialRefresh({
-      clientRef,
-      profile,
-      operation: (client) =>
-        client.send(
-          new ListObjectsV2Command({
-            Bucket: bucket,
-            Prefix: prefix,
-            Delimiter: "/",
-            ContinuationToken: continuationToken,
-            MaxKeys: maxKeys,
-          }),
-        ),
+    const response = await storage.listObjects({
+      bucket,
+      prefix,
+      delimiter: "/",
+      continuationToken,
+      maxKeys,
     });
 
     collectedPrefixes.push(
-      ...(response.CommonPrefixes ?? [])
-        .map((entry) => entry.Prefix)
-        .filter((value): value is string => Boolean(value)),
+      ...response.commonPrefixes,
     );
 
     collectedObjectKeys.push(
-      ...(response.Contents ?? [])
-        .map((entry) => entry.Key)
-        .filter((value): value is string => Boolean(value))
-        .filter((value) => value !== prefix),
+      ...response.objectKeys.filter((value) => value !== prefix),
     );
 
-    continuationToken = response.NextContinuationToken ?? undefined;
+    continuationToken = response.nextContinuationToken ?? undefined;
   } while (continuationToken);
 
   return {
@@ -351,7 +256,7 @@ async function collectRelativePrefixes({
   maxKeysPerLevel?: number;
   maxPrefixesToVisit?: number;
 }) {
-  const clientRef = { current: await createS3Client(profile) };
+  const storage = await createStorageForProfile(profile);
   const normalizedRootPrefix = rootPrefix.trim();
   const relativePaths = new Set<string>();
   const queue: Array<{ prefix: string; depth: number }> = deriveDiscoveryPrefixes({
@@ -374,8 +279,7 @@ async function collectRelativePrefixes({
     }
 
     const { prefixes: childPrefixes, objectKeys } = await listAllChildrenForBucketLevel({
-      clientRef,
-      profile,
+      storage,
       bucket,
       prefix: current.prefix,
       maxKeys: maxKeysPerLevel,

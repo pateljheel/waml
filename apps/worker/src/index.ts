@@ -1,8 +1,4 @@
 import {
-  GetObjectCommand,
-  S3Client,
-} from "@aws-sdk/client-s3";
-import {
   appendJobResults,
   appendJobEvent,
   cancelJob,
@@ -62,7 +58,7 @@ import {
   deriveManifestScopePrefixes,
   loadManifestScopeObjects,
 } from "./manifest";
-import { createS3Client, sendWithCredentialRefresh } from "./s3";
+import { createObjectStoreReader } from "./storage";
 import fsSync from "node:fs";
 import fs from "node:fs/promises";
 import { Readable } from "node:stream";
@@ -198,7 +194,13 @@ async function writeCachedChunkArtifact({
   minTimestampMs: number | null;
   maxTimestampMs: number | null;
 }) {
-  const chunkPk = createObjectCacheKey(job.source.bucket, objectKey, etag, chunkId);
+  const chunkPk = createObjectCacheKey(
+    job.source.provider,
+    job.source.bucket,
+    objectKey,
+    etag,
+    chunkId,
+  );
   const cachePaths = getObjectCachePaths(chunkPk);
   const tempTextPath = `${cachePaths.textPath}.${process.pid}.tmp`;
   const tempTrigramPath = `${cachePaths.trigramPath}.${process.pid}.tmp`;
@@ -222,6 +224,7 @@ async function writeCachedChunkArtifact({
 
   upsertCacheChunk({
     chunkPk,
+    provider: job.source.provider,
     bucket: job.source.bucket,
     objectKey,
     etag,
@@ -337,7 +340,7 @@ async function flushMatches(jobId: string, matches: SearchMatch[]) {
 }
 
 async function processObject({
-  clientRef,
+  reader,
   job,
   objectKey,
   etag,
@@ -350,7 +353,7 @@ async function processObject({
   queryStartEpochMs,
   queryEndEpochMs,
 }: {
-  clientRef: { current: S3Client };
+  reader: Awaited<ReturnType<typeof createObjectStoreReader>>;
   job: SearchJob;
   objectKey: string;
   etag: string;
@@ -368,7 +371,12 @@ async function processObject({
   const patternTrigrams = shouldUseTrigramPrefilter(job)
     ? buildPatternTrigrams(job.pattern)
     : null;
-  const cachedChunks = listCacheChunksForObject(job.source.bucket, objectKey, etag);
+  const cachedChunks = listCacheChunksForObject(
+    job.source.provider,
+    job.source.bucket,
+    objectKey,
+    etag,
+  );
   const partitionValues =
     extractCustomValues(relativePath, job.customPathPattern) ??
     extractHiveValues(relativePath);
@@ -479,7 +487,12 @@ async function processObject({
   }
 
   if (cachedChunks.length > 0) {
-    const staleChunks = deleteCacheChunksForObject(job.source.bucket, objectKey, etag);
+    const staleChunks = deleteCacheChunksForObject(
+      job.source.provider,
+      job.source.bucket,
+      objectKey,
+      etag,
+    );
     await Promise.allSettled(
       staleChunks.flatMap((chunk) => [
         fs.rm(chunk.artifactPath, { force: true }),
@@ -504,22 +517,13 @@ async function processObject({
   }
 
   const controller = new AbortController();
-  const response = await sendWithCredentialRefresh({
-    clientRef,
-    profile: job.source.awsProfile,
-    operation: (client) =>
-      client.send(
-        new GetObjectCommand({
-          Bucket: job.source.bucket,
-          Key: objectKey,
-        }),
-        {
-          abortSignal: controller.signal,
-        },
-      ),
+  const response = await reader.getObject({
+    bucket: job.source.bucket,
+    key: objectKey,
+    abortSignal: controller.signal,
   });
 
-  const body = response.Body as AsyncIterable<Uint8Array | Buffer | string> | undefined;
+  const body = response.body as AsyncIterable<Uint8Array | Buffer | string> | undefined;
   const sourceStream =
     body && typeof (body as NodeJS.ReadableStream).pipe === "function"
       ? (body as Readable)
@@ -531,12 +535,12 @@ async function processObject({
     return;
   }
 
-  if (!gzipObject && shouldSkipObjectByContentType(response.ContentType)) {
+  if (!gzipObject && shouldSkipObjectByContentType(response.contentType)) {
     sourceStream.destroy();
     appendJobEvent(job.id, "object.skipped", {
       objectKey,
       reason: "binary_content_type",
-      contentType: response.ContentType ?? null,
+      contentType: response.contentType ?? null,
     });
     return;
   }
@@ -785,9 +789,7 @@ async function processObject({
 }
 
 async function runSearchJob(job: SearchJob) {
-  const clientRef = {
-    current: await createS3Client(job.source.awsProfile),
-  };
+  const reader = await createObjectStoreReader(job.source);
   const progress = { ...job.progress };
   const pendingMatches: SearchMatch[] = [];
   const lastProgressAt = { value: Date.now() };
@@ -829,7 +831,7 @@ async function runSearchJob(job: SearchJob) {
 
     const scopePrefix = scopePrefixes[scopeIndex];
     const objects = await loadManifestScopeObjects({
-      clientRef,
+      reader,
       job,
       scopePrefix,
       queryStartEpochMs,
@@ -850,7 +852,7 @@ async function runSearchJob(job: SearchJob) {
         : object.key;
 
       await processObject({
-        clientRef,
+        reader,
         job,
         objectKey: object.key,
         etag: object.etag,

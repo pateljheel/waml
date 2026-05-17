@@ -16,6 +16,7 @@ export function getCacheBudgetBytes() {
 }
 
 export function createObjectCacheKey(
+  provider: SearchJob["source"]["provider"],
   bucket: string,
   objectKey: string,
   etag: string,
@@ -23,7 +24,7 @@ export function createObjectCacheKey(
 ) {
   return crypto
     .createHash("sha256")
-    .update(`${bucket}\n${objectKey}\n${etag}\n${chunkId}`)
+    .update(`${provider}\n${bucket}\n${objectKey}\n${etag}\n${chunkId}`)
     .digest("hex");
 }
 

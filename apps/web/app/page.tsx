@@ -9,6 +9,7 @@ import type {
   SearchJob,
   SearchJobStatus,
   SearchMatch,
+  StorageProvider,
   TimeComponent,
 } from "@waml/shared";
 import { normalizePrefixFilters } from "@waml/shared";
@@ -19,6 +20,7 @@ type Notebook = {
   title: string;
   status: "running" | "idle";
   queryMode: QueryMode;
+  provider: StorageProvider;
   awsProfile: string;
   bucket: string;
   rootPrefix: string;
@@ -137,6 +139,7 @@ const initialNotebooks: Notebook[] = [
     title: "Checkout errors",
     status: "running",
     queryMode: "substring",
+    provider: "s3",
     awsProfile: "prod-observability",
     bucket: "company-prod-logs",
     rootPrefix: "apps/checkout/prod/",
@@ -161,6 +164,7 @@ const initialNotebooks: Notebook[] = [
     title: "Auth refresh",
     status: "idle",
     queryMode: "substring",
+    provider: "s3",
     awsProfile: "prod-observability",
     bucket: "company-prod-logs",
     rootPrefix: "apps/auth/prod/",
@@ -185,6 +189,7 @@ const initialNotebooks: Notebook[] = [
     title: "Queue latency",
     status: "idle",
     queryMode: "substring",
+    provider: "s3",
     awsProfile: "stage-observability",
     bucket: "company-stage-logs",
     rootPrefix: "workers/ingest/staging/",
@@ -297,6 +302,7 @@ function getPrefixLabel(currentPrefix: string, candidatePrefix: string) {
 function normalizeNotebook(notebook: Partial<Notebook> & Pick<Notebook, "id" | "title">) {
   const normalizedNotebook = {
     status: "idle" as Notebook["status"],
+    provider: "s3" as StorageProvider,
     awsProfile: "",
     queryMode: "substring" as QueryMode,
     bucket: "",
@@ -1040,6 +1046,7 @@ export default function HomePage() {
         startTime: activeNotebook.startTime,
         endTime: activeNotebook.endTime,
         source: {
+          provider: activeNotebook.provider,
           awsProfile: activeNotebook.awsProfile,
           bucket: activeNotebook.bucket,
           rootPrefix: activeNotebook.rootPrefix,
@@ -1125,7 +1132,7 @@ export default function HomePage() {
     if (
       !activeNotebook.bucket.trim() ||
       !window.confirm(
-        `Invalidate cached search artifacts for s3://${activeNotebook.bucket}/${activeNotebook.rootPrefix}?`,
+        `Invalidate cached search artifacts for ${activeNotebook.provider}://${activeNotebook.bucket}/${activeNotebook.rootPrefix}?`,
       )
     ) {
       return;
@@ -1143,6 +1150,7 @@ export default function HomePage() {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
+        provider: activeNotebook.provider,
         bucket: activeNotebook.bucket,
         rootPrefix: activeNotebook.rootPrefix,
       }),
@@ -1184,7 +1192,7 @@ export default function HomePage() {
     if (
       !activeNotebook.bucket.trim() ||
       !window.confirm(
-        `Invalidate the objects manifest for s3://${activeNotebook.bucket}/${activeNotebook.rootPrefix}?`,
+        `Invalidate the objects manifest for ${activeNotebook.provider}://${activeNotebook.bucket}/${activeNotebook.rootPrefix}?`,
       )
     ) {
       return;
@@ -1202,6 +1210,7 @@ export default function HomePage() {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
+        provider: activeNotebook.provider,
         bucket: activeNotebook.bucket,
         rootPrefix: activeNotebook.rootPrefix,
       }),
@@ -1235,6 +1244,7 @@ export default function HomePage() {
       title: `Notebook ${notebooks.length + 1}`,
       status: "idle",
       queryMode: activeNotebook.queryMode,
+      provider: activeNotebook.provider,
       awsProfile: activeNotebook.awsProfile,
       bucket: activeNotebook.bucket,
       rootPrefix: activeNotebook.rootPrefix,
@@ -2327,7 +2337,7 @@ export default function HomePage() {
             <span className="field-state">
               {loadingProfiles
                 ? "Loading profiles..."
-                : `s3://${activeNotebook.bucket}/${activeNotebook.rootPrefix}`}
+                : `${activeNotebook.provider}://${activeNotebook.bucket}/${activeNotebook.rootPrefix}`}
             </span>
           </div>
           <div className="field field-bucket">

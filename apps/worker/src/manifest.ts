@@ -1,4 +1,3 @@
-import { ListObjectsV2Command, S3Client } from "@aws-sdk/client-s3";
 import {
   getManifestScope,
   listManifestObjects,
@@ -9,7 +8,7 @@ import type {
   PrefixFilterSelection,
   SearchJob,
 } from "@waml/shared";
-import { sendWithCredentialRefresh } from "./s3";
+import type { WorkerObjectStoreReader } from "./storage";
 
 const defaultManifestMaxPrefixes = 512;
 const defaultManifestForceRefreshWindowMs = 6 * 60 * 60 * 1000;
@@ -399,14 +398,14 @@ export function deriveManifestScopePrefixes(
 }
 
 async function refreshManifestScope({
-  clientRef,
-  profile,
+  reader,
+  provider,
   bucket,
   rootPrefix,
   scopePrefix,
 }: {
-  clientRef: { current: S3Client };
-  profile: string;
+  reader: WorkerObjectStoreReader;
+  provider: SearchJob["source"]["provider"];
   bucket: string;
   rootPrefix: string;
   scopePrefix: string;
@@ -415,37 +414,31 @@ async function refreshManifestScope({
   let continuationToken: string | undefined;
 
   do {
-    const response = await sendWithCredentialRefresh({
-      clientRef,
-      profile,
-      operation: (client) =>
-        client.send(
-          new ListObjectsV2Command({
-            Bucket: bucket,
-            Prefix: scopePrefix.trim() || undefined,
-            ContinuationToken: continuationToken,
-            MaxKeys: 1000,
-          }),
-        ),
+    const response = await reader.listObjectsPage({
+      bucket,
+      prefix: scopePrefix.trim(),
+      continuationToken,
+      maxKeys: 1000,
     });
 
-    for (const entry of response.Contents ?? []) {
-      if (!entry.Key || entry.Key === scopePrefix) {
+    for (const entry of response.objects) {
+      if (!entry.key || entry.key === scopePrefix) {
         continue;
       }
 
       objects.push({
-        key: entry.Key,
-        etag: entry.ETag?.replaceAll('"', "") ?? "",
-        size: entry.Size ?? 0,
-        lastModified: entry.LastModified?.toISOString() ?? "",
+        key: entry.key,
+        etag: entry.etag,
+        size: entry.size,
+        lastModified: entry.lastModified,
       });
     }
 
-    continuationToken = response.NextContinuationToken ?? undefined;
+    continuationToken = response.nextContinuationToken ?? undefined;
   } while (continuationToken);
 
   replaceManifestScopeObjects({
+    provider,
     bucket,
     rootPrefix,
     scopePrefix,
@@ -461,13 +454,13 @@ async function refreshManifestScope({
 }
 
 export async function loadManifestScopeObjects({
-  clientRef,
+  reader,
   job,
   scopePrefix,
   queryStartEpochMs,
   queryEndEpochMs,
 }: {
-  clientRef: { current: S3Client };
+  reader: WorkerObjectStoreReader;
   job: SearchJob;
   scopePrefix: string;
   queryStartEpochMs: number | null;
@@ -478,6 +471,7 @@ export async function loadManifestScopeObjects({
     queryEndEpochMs,
   );
   const manifestScope = getManifestScope(
+    job.source.provider,
     job.source.bucket,
     job.source.rootPrefix.trim(),
     scopePrefix,
@@ -488,6 +482,7 @@ export async function loadManifestScopeObjects({
 
     if (Number.isFinite(ageMs) && ageMs >= 0 && ageMs <= freshnessPolicy.ttlMs) {
       const cachedObjects = listManifestObjects(
+        job.source.provider,
         job.source.bucket,
         job.source.rootPrefix.trim(),
         scopePrefix,
@@ -505,8 +500,8 @@ export async function loadManifestScopeObjects({
   }
 
   return refreshManifestScope({
-    clientRef,
-    profile: job.source.awsProfile,
+    reader,
+    provider: job.source.provider,
     bucket: job.source.bucket,
     rootPrefix: job.source.rootPrefix.trim(),
     scopePrefix,
