@@ -542,6 +542,9 @@ function mapJobRow(row: JobRow): SearchJob {
     source: {
       provider: rawSource.provider ?? "s3",
       awsProfile: rawSource.awsProfile ?? "",
+      gcpProject: rawSource.gcpProject ?? "",
+      authMode: rawSource.authMode ?? "adc",
+      serviceAccountKeyPath: rawSource.serviceAccountKeyPath ?? "",
       bucket: rawSource.bucket ?? "",
       rootPrefix: rawSource.rootPrefix ?? "",
     },
@@ -586,7 +589,10 @@ export function createJob(input: CreateSearchJobInput): SearchJob {
     endTime: input.endTime ?? "",
     source: {
       provider: input.source.provider ?? "s3",
-      awsProfile: input.source.awsProfile,
+      awsProfile: input.source.awsProfile ?? "",
+      gcpProject: input.source.gcpProject ?? "",
+      authMode: input.source.authMode ?? "adc",
+      serviceAccountKeyPath: input.source.serviceAccountKeyPath ?? "",
       bucket: input.source.bucket,
       rootPrefix: input.source.rootPrefix,
     },

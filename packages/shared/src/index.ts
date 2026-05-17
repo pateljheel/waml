@@ -22,12 +22,18 @@ export const searchOptionsSchema = z.object({
 
 export type SearchOptions = z.infer<typeof searchOptionsSchema>;
 
-export const storageProviderSchema = z.enum(["s3"]);
+export const storageProviderSchema = z.enum(["s3", "gcs"]);
 export type StorageProvider = z.infer<typeof storageProviderSchema>;
+
+export const gcsAuthModeSchema = z.enum(["adc", "service_account"]);
+export type GcsAuthMode = z.infer<typeof gcsAuthModeSchema>;
 
 export const notebookSourceSchema = z.object({
   provider: storageProviderSchema.default("s3"),
-  awsProfile: z.string().min(1),
+  awsProfile: z.string().default(""),
+  gcpProject: z.string().default(""),
+  authMode: gcsAuthModeSchema.default("adc"),
+  serviceAccountKeyPath: z.string().default(""),
   bucket: z.string().min(1),
   rootPrefix: z.string().default(""),
 });

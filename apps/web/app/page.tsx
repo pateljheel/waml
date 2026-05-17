@@ -1,6 +1,7 @@
 "use client";
 
 import type {
+  GcsAuthMode,
   LineTimestampParser,
   PrefixFilterSelection,
   NotebookTimeConfig,
@@ -22,6 +23,9 @@ type Notebook = {
   queryMode: QueryMode;
   provider: StorageProvider;
   awsProfile: string;
+  gcpProject: string;
+  authMode: GcsAuthMode;
+  serviceAccountKeyPath: string;
   bucket: string;
   rootPrefix: string;
   customPathPattern: string;
@@ -141,6 +145,9 @@ const initialNotebooks: Notebook[] = [
     queryMode: "substring",
     provider: "s3",
     awsProfile: "prod-observability",
+    gcpProject: "",
+    authMode: "adc",
+    serviceAccountKeyPath: "",
     bucket: "company-prod-logs",
     rootPrefix: "apps/checkout/prod/",
     customPathPattern: "",
@@ -166,6 +173,9 @@ const initialNotebooks: Notebook[] = [
     queryMode: "substring",
     provider: "s3",
     awsProfile: "prod-observability",
+    gcpProject: "",
+    authMode: "adc",
+    serviceAccountKeyPath: "",
     bucket: "company-prod-logs",
     rootPrefix: "apps/auth/prod/",
     customPathPattern: "",
@@ -191,6 +201,9 @@ const initialNotebooks: Notebook[] = [
     queryMode: "substring",
     provider: "s3",
     awsProfile: "stage-observability",
+    gcpProject: "",
+    authMode: "adc",
+    serviceAccountKeyPath: "",
     bucket: "company-stage-logs",
     rootPrefix: "workers/ingest/staging/",
     customPathPattern: "",
@@ -304,6 +317,9 @@ function normalizeNotebook(notebook: Partial<Notebook> & Pick<Notebook, "id" | "
     status: "idle" as Notebook["status"],
     provider: "s3" as StorageProvider,
     awsProfile: "",
+    gcpProject: "",
+    authMode: "adc" as GcsAuthMode,
+    serviceAccountKeyPath: "",
     queryMode: "substring" as QueryMode,
     bucket: "",
     rootPrefix: "",
@@ -337,6 +353,22 @@ function normalizeNotebook(notebook: Partial<Notebook> & Pick<Notebook, "id" | "
     partitionFilters: normalizePrefixFilters(normalizedNotebook.partitionFilters),
     contextLineCount: normalizedNotebook.contextLineCount ?? 20,
   } satisfies Notebook;
+}
+
+function isS3Notebook(notebook: Notebook) {
+  return notebook.provider === "s3";
+}
+
+function getNotebookSourceSummary(notebook: Notebook) {
+  const root = notebook.rootPrefix ? `/${notebook.rootPrefix}` : "";
+
+  if (notebook.provider === "s3") {
+    const profileLabel = notebook.awsProfile.trim() || "No AWS profile";
+    return `${profileLabel} · s3://${notebook.bucket}${root}`;
+  }
+
+  const projectLabel = notebook.gcpProject.trim() || "GCS";
+  return `${projectLabel} · gcs://${notebook.bucket}${root}`;
 }
 
 function clonePrefixFilters(prefixFilters: PrefixFilters) {
@@ -1031,7 +1063,12 @@ export default function HomePage() {
   async function runSearch() {
     const pattern = activeNotebook.query.trim();
 
-    if (!pattern || !activeNotebook.awsProfile || !activeNotebook.bucket) {
+    if (
+      !providerSupportsSearch ||
+      !pattern ||
+      !activeNotebook.awsProfile ||
+      !activeNotebook.bucket
+    ) {
       return;
     }
 
@@ -1050,6 +1087,9 @@ export default function HomePage() {
         source: {
           provider: activeNotebook.provider,
           awsProfile: activeNotebook.awsProfile,
+          gcpProject: activeNotebook.gcpProject,
+          authMode: activeNotebook.authMode,
+          serviceAccountKeyPath: activeNotebook.serviceAccountKeyPath,
           bucket: activeNotebook.bucket,
           rootPrefix: activeNotebook.rootPrefix,
         },
@@ -1248,6 +1288,9 @@ export default function HomePage() {
       queryMode: activeNotebook.queryMode,
       provider: activeNotebook.provider,
       awsProfile: activeNotebook.awsProfile,
+      gcpProject: activeNotebook.gcpProject,
+      authMode: activeNotebook.authMode,
+      serviceAccountKeyPath: activeNotebook.serviceAccountKeyPath,
       bucket: activeNotebook.bucket,
       rootPrefix: activeNotebook.rootPrefix,
       customPathPattern: activeNotebook.customPathPattern,
@@ -1325,6 +1368,12 @@ export default function HomePage() {
   }
 
   useEffect(() => {
+    if (!isS3Notebook(activeNotebook)) {
+      setLoadingProfiles(false);
+      setAwsError(null);
+      return;
+    }
+
     let cancelled = false;
 
     async function loadProfiles() {
@@ -1385,13 +1434,14 @@ export default function HomePage() {
     return () => {
       cancelled = true;
     };
-  }, [activeNotebook.awsProfile, activeNotebookId]);
+  }, [activeNotebook.provider, activeNotebook.awsProfile, activeNotebookId]);
 
   useEffect(() => {
-    if (!activeNotebook.awsProfile) {
+    if (!isS3Notebook(activeNotebook) || !activeNotebook.awsProfile) {
       setAvailableBuckets([]);
       setBucketTotalPages(1);
       setBucketTotalItems(0);
+      setLoadingBuckets(false);
       return;
     }
 
@@ -1469,6 +1519,7 @@ export default function HomePage() {
       cancelled = true;
     };
   }, [
+    activeNotebook.provider,
     activeNotebook.awsProfile,
     activeNotebook.bucket,
     activeNotebookId,
@@ -1478,9 +1529,14 @@ export default function HomePage() {
   ]);
 
   useEffect(() => {
-    if (!activeNotebook.awsProfile || !activeNotebook.bucket) {
+    if (
+      !isS3Notebook(activeNotebook) ||
+      !activeNotebook.awsProfile ||
+      !activeNotebook.bucket
+    ) {
       setAvailablePrefixes([]);
       setNextPrefixCursor(null);
+      setLoadingPrefixes(false);
       return;
     }
 
@@ -1540,6 +1596,7 @@ export default function HomePage() {
       window.clearTimeout(timeoutId);
     };
   }, [
+    activeNotebook.provider,
     activeNotebook.awsProfile,
     activeNotebook.bucket,
     activeNotebook.rootPrefix,
@@ -1548,8 +1605,13 @@ export default function HomePage() {
   ]);
 
   useEffect(() => {
-    if (!activeNotebook.awsProfile || !activeNotebook.bucket) {
+    if (
+      !isS3Notebook(activeNotebook) ||
+      !activeNotebook.awsProfile ||
+      !activeNotebook.bucket
+    ) {
       setPartitionDefinitions([]);
+      setLoadingPartitions(false);
       return;
     }
 
@@ -1639,6 +1701,7 @@ export default function HomePage() {
       window.clearTimeout(timeoutId);
     };
   }, [
+    activeNotebook.provider,
     activeNotebook.awsProfile,
     activeNotebook.bucket,
     activeNotebook.rootPrefix,
@@ -1649,13 +1712,18 @@ export default function HomePage() {
 
   useEffect(() => {
     setBucketPage(1);
-  }, [bucketSearch, activeNotebook.awsProfile]);
+  }, [bucketSearch, activeNotebook.provider, activeNotebook.awsProfile]);
 
   useEffect(() => {
     setPrefixCursor(null);
     setPrefixCursorStack([]);
     setNextPrefixCursor(null);
-  }, [activeNotebook.awsProfile, activeNotebook.bucket, activeNotebook.rootPrefix]);
+  }, [
+    activeNotebook.provider,
+    activeNotebook.awsProfile,
+    activeNotebook.bucket,
+    activeNotebook.rootPrefix,
+  ]);
 
   useEffect(() => {
     const openEntries = Object.entries(partitionPickerState).filter(
@@ -1665,6 +1733,7 @@ export default function HomePage() {
 
     if (
       openKeys.length === 0 ||
+      !isS3Notebook(activeNotebook) ||
       !activeNotebook.awsProfile ||
       !activeNotebook.bucket
     ) {
@@ -1747,6 +1816,7 @@ export default function HomePage() {
     };
   }, [
     partitionPickerQueryKey,
+    activeNotebook.provider,
     activeNotebook.awsProfile,
     activeNotebook.bucket,
     activeNotebook.rootPrefix,
@@ -1814,6 +1884,8 @@ export default function HomePage() {
       lineTimestamp: null,
       errors: [],
     };
+  const providerSupportsDiscovery = activeNotebook.provider === "s3";
+  const providerSupportsSearch = activeNotebook.provider === "s3";
   function getPartitionPicker(key: string): PartitionValuePickerState {
     return (
       partitionPickerState[key] ?? {
@@ -1829,8 +1901,10 @@ export default function HomePage() {
     );
   }
   const canRunSearch =
+    providerSupportsSearch &&
     activeNotebook.query.trim().length > 0 &&
-    activeNotebook.awsProfile.trim().length > 0 &&
+    (activeNotebook.provider !== "s3" ||
+      activeNotebook.awsProfile.trim().length > 0) &&
     activeNotebook.bucket.trim().length > 0 &&
     currentSearchState.status !== "running" &&
     currentSearchState.status !== "cancelling";
@@ -1854,12 +1928,14 @@ export default function HomePage() {
     !currentSearchState.loadingPage &&
     (hasBufferedNextResultsPage || canAskForMoreResults);
   const canInvalidateCache =
+    providerSupportsSearch &&
     activeNotebook.bucket.trim().length > 0 &&
     currentSearchState.status !== "queued" &&
     currentSearchState.status !== "running" &&
     currentSearchState.status !== "cancelling" &&
     !currentCacheInvalidateState.loading;
   const canInvalidateManifest =
+    providerSupportsSearch &&
     activeNotebook.bucket.trim().length > 0 &&
     currentSearchState.status !== "queued" &&
     currentSearchState.status !== "running" &&
@@ -2285,7 +2361,7 @@ export default function HomePage() {
                 </div>
               ) : null}
               <p className="notebook-source">
-                {notebook.awsProfile} · {notebook.bucket}/{notebook.rootPrefix}
+                {getNotebookSourceSummary(notebook)}
               </p>
             </button>
           ))}
@@ -2320,6 +2396,27 @@ export default function HomePage() {
         </header>
 
         <section className="search-bar">
+          <div className="field field-provider">
+            <label htmlFor="storage-provider">Storage provider</label>
+            <select
+              className="control"
+              id="storage-provider"
+              value={activeNotebook.provider}
+              onChange={(event) =>
+                updateActiveNotebook("provider", event.target.value as StorageProvider)
+              }
+            >
+              <option value="s3">Amazon S3</option>
+              <option value="gcs">Google Cloud Storage</option>
+            </select>
+            <span className="field-state">
+              {activeNotebook.provider === "s3"
+                ? "Current search and discovery implementation."
+                : "UI-only for now. GCS browsing and search arrive in later phases."}
+            </span>
+          </div>
+          {activeNotebook.provider === "s3" ? (
+            <>
           <div className="field field-profile">
             <label htmlFor="aws-profile">AWS profile</label>
             <select
@@ -2548,6 +2645,77 @@ export default function HomePage() {
               ) : null}
             </div>
           </div>
+            </>
+          ) : (
+            <>
+              <div className="field field-profile">
+                <label htmlFor="gcp-project">GCP project</label>
+                <input
+                  id="gcp-project"
+                  value={activeNotebook.gcpProject}
+                  placeholder="Optional project id"
+                  onChange={(event) =>
+                    updateActiveNotebook("gcpProject", event.target.value)
+                  }
+                />
+                <span className="field-state">
+                  {`gcs://${activeNotebook.bucket}/${activeNotebook.rootPrefix}`}
+                </span>
+              </div>
+              <div className="field field-bucket">
+                <label htmlFor="gcs-bucket">Bucket</label>
+                <input
+                  id="gcs-bucket"
+                  value={activeNotebook.bucket}
+                  placeholder="Enter bucket name"
+                  onChange={(event) =>
+                    updateActiveNotebook("bucket", event.target.value)
+                  }
+                />
+              </div>
+              <div className="field field-prefix">
+                <label htmlFor="gcs-root-prefix">Root prefix</label>
+                <input
+                  id="gcs-root-prefix"
+                  value={activeNotebook.rootPrefix}
+                  placeholder="Optional root prefix"
+                  onChange={(event) =>
+                    updateActiveNotebook("rootPrefix", event.target.value)
+                  }
+                />
+              </div>
+              <div className="field search-root-hint">
+                <label htmlFor="gcs-auth-mode">GCS auth</label>
+                <select
+                  className="control"
+                  id="gcs-auth-mode"
+                  value={activeNotebook.authMode}
+                  onChange={(event) =>
+                    updateActiveNotebook("authMode", event.target.value as GcsAuthMode)
+                  }
+                >
+                  <option value="adc">Application Default Credentials</option>
+                  <option value="service_account">Service account key path</option>
+                </select>
+                <p className="field-state">
+                  Authentication wiring is not active yet. These settings are stored for the next provider phases.
+                </p>
+              </div>
+              {activeNotebook.authMode === "service_account" ? (
+                <div className="field search-root-hint">
+                  <label htmlFor="gcs-service-account-key-path">Service account key path</label>
+                  <input
+                    id="gcs-service-account-key-path"
+                    value={activeNotebook.serviceAccountKeyPath}
+                    placeholder="/path/to/service-account.json"
+                    onChange={(event) =>
+                      updateActiveNotebook("serviceAccountKeyPath", event.target.value)
+                    }
+                  />
+                </div>
+              ) : null}
+            </>
+          )}
           {awsError ? (
             <div className="field search-root-hint">
               <p className="field-error">{awsError}</p>
@@ -3095,6 +3263,11 @@ export default function HomePage() {
                     ? "Exact substring match over objects under the selected root."
                     : "All tokens must appear in a line, in any order."}
                 </p>
+                {!providerSupportsSearch ? (
+                  <p className="field-state">
+                    Search execution is currently enabled only for S3 notebooks.
+                  </p>
+                ) : null}
               </div>
               <div className="search-actions">
                 <button
