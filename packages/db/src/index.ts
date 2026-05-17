@@ -752,21 +752,24 @@ export function countJobResults(jobId: string) {
   return row.total ?? 0;
 }
 
-export function listJobResultsPage(jobId: string, page: number, pageSize: number) {
+export function listJobResultsAfterSequence(
+  jobId: string,
+  afterSequenceNo: number,
+  pageSize: number,
+) {
   const db = initializeDatabase();
-  const safePage = Math.max(1, page);
+  const safeAfterSequenceNo = Math.max(0, afterSequenceNo);
   const safePageSize = Math.max(1, pageSize);
-  const offset = (safePage - 1) * safePageSize;
   const rows = db
     .prepare(
-      `SELECT object_key, line_number, timestamp_text, line_text
-       , etag
+      `SELECT sequence_no, object_key, line_number, timestamp_text, line_text, etag
        FROM job_results
-       WHERE job_id = ?
+       WHERE job_id = ? AND sequence_no > ?
        ORDER BY sequence_no ASC
-       LIMIT ? OFFSET ?`,
+       LIMIT ?`,
     )
-    .all(jobId, safePageSize, offset) as Array<{
+    .all(jobId, safeAfterSequenceNo, safePageSize) as Array<{
+      sequence_no: number;
       object_key: string;
       etag: string;
       line_number: number;
@@ -775,6 +778,7 @@ export function listJobResultsPage(jobId: string, page: number, pageSize: number
     }>;
 
   return rows.map((row) => ({
+    sequenceNo: row.sequence_no,
     objectKey: row.object_key,
     etag: row.etag || undefined,
     lineNumber: row.line_number,

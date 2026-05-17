@@ -1,4 +1,4 @@
-import { countJobResults, getJob, listJobResultsPage } from "@waml/db";
+import { countJobResults, getJob, listJobResultsAfterSequence } from "@waml/db";
 import { NextResponse } from "next/server";
 
 export const runtime = "nodejs";
@@ -20,19 +20,26 @@ export async function GET(
   }
 
   const searchParams = new URL(request.url).searchParams;
-  const page = Math.max(1, Number(searchParams.get("page") ?? "1") || 1);
+  const afterSequence = Math.max(
+    0,
+    Number(searchParams.get("afterSequence") ?? "0") || 0,
+  );
   const pageSize = Math.max(
     1,
     Number(searchParams.get("pageSize") ?? String(job.pageSize)) || job.pageSize,
   );
   const totalResults = countJobResults(jobId);
-  const results = listJobResultsPage(jobId, page, pageSize);
+  const rows = listJobResultsAfterSequence(jobId, afterSequence, pageSize);
+  const results = rows.map(({ sequenceNo: _sequenceNo, ...result }) => result);
+  const nextCursor =
+    rows.length === pageSize ? rows[rows.length - 1]?.sequenceNo ?? null : null;
 
   return NextResponse.json(
     {
-      page,
+      afterSequence,
       pageSize,
       totalResults,
+      nextCursor,
       results,
       job,
     },

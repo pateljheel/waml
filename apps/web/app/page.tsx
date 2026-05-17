@@ -67,6 +67,9 @@ type NotebookSearchState = {
   page: number;
   pageSize: number;
   totalResults: number;
+  currentResultCursor: number;
+  nextResultCursor: number | null;
+  pageCursors: number[];
   loadingPage: boolean;
   results: SearchMatch[];
   cache: {
@@ -249,6 +252,9 @@ function createEmptySearchState(): NotebookSearchState {
     page: 1,
     pageSize: 100,
     totalResults: 0,
+    currentResultCursor: 0,
+    nextResultCursor: null,
+    pageCursors: [0],
     loadingPage: false,
     results: [],
     cache: {
@@ -630,6 +636,7 @@ export default function HomePage() {
     notebookId: string,
     jobId: string,
     page: number,
+    afterSequence: number,
     pageSize: number,
   ) {
     setSearchState(notebookId, (current) => ({
@@ -639,15 +646,16 @@ export default function HomePage() {
     }));
 
     const response = await fetch(
-      `/api/search/${jobId}/results?page=${page}&pageSize=${pageSize}`,
+      `/api/search/${jobId}/results?afterSequence=${afterSequence}&pageSize=${pageSize}`,
       {
         cache: "no-store",
       },
     );
     const payload = (await response.json()) as {
-      page?: number;
+      afterSequence?: number;
       pageSize?: number;
       totalResults?: number;
+      nextCursor?: number | null;
       results?: SearchMatch[];
       job?: SearchJob;
       error?: string;
@@ -666,9 +674,18 @@ export default function HomePage() {
       ...current,
       progress: payload.job?.progress ?? current.progress,
       status: payload.job?.status ?? current.status,
-      page: payload.page ?? page,
+      page,
       pageSize: payload.pageSize ?? pageSize,
       totalResults: payload.totalResults ?? current.totalResults,
+      currentResultCursor: payload.afterSequence ?? afterSequence,
+      nextResultCursor: payload.nextCursor ?? null,
+      pageCursors:
+        current.pageCursors[page - 1] === (payload.afterSequence ?? afterSequence)
+          ? current.pageCursors
+          : [
+              ...current.pageCursors.slice(0, Math.max(0, page - 1)),
+              payload.afterSequence ?? afterSequence,
+            ],
       results: payload.results ?? [],
       loadingPage: false,
     }));
@@ -682,13 +699,15 @@ export default function HomePage() {
     }
 
     const nextPage = currentSearch.page + 1;
-    const bufferedResultsNeeded = nextPage * currentSearch.pageSize;
-
-    if (bufferedResultsNeeded <= currentSearch.totalResults) {
+    if (
+      currentSearch.page * currentSearch.pageSize < currentSearch.totalResults &&
+      currentSearch.nextResultCursor !== null
+    ) {
       await fetchResultsPage(
         activeNotebook.id,
         currentSearch.jobId,
         nextPage,
+        currentSearch.nextResultCursor,
         currentSearch.pageSize,
       );
       return;
@@ -734,6 +753,7 @@ export default function HomePage() {
       activeNotebook.id,
       currentSearch.jobId,
       currentSearch.page - 1,
+      currentSearch.pageCursors[currentSearch.page - 2] ?? 0,
       currentSearch.pageSize,
     );
   }
@@ -901,6 +921,7 @@ export default function HomePage() {
               notebookId,
               current.jobId,
               current.page,
+              current.currentResultCursor,
               current.pageSize,
             );
           }
@@ -1051,6 +1072,9 @@ export default function HomePage() {
       page: 1,
       pageSize: payload.job.pageSize,
       totalResults: 0,
+      currentResultCursor: 0,
+      nextResultCursor: null,
+      pageCursors: [0],
       loadingPage: false,
       results: [],
       contextByResultKey: {},
@@ -3228,28 +3252,6 @@ export default function HomePage() {
               </div>
             ) : null}
             <div className="search-results">
-              <div className="pager-row search-results-pager">
-                <button
-                  type="button"
-                  className="secondary-button"
-                  onClick={loadPreviousResultsPage}
-                  disabled={!hasPreviousResultsPage || currentSearchState.loadingPage}
-                >
-                  Prev page
-                </button>
-                <button
-                  type="button"
-                  className="secondary-button"
-                  onClick={loadNextResultsPage}
-                  disabled={!canLoadNextResultsPage}
-                >
-                  {currentSearchState.loadingPage
-                    ? "Loading..."
-                    : hasBufferedNextResultsPage
-                      ? "Next page"
-                      : "Scan more"}
-                </button>
-              </div>
               {currentSearchState.results.length === 0 ? (
                 <div className="search-results-empty">
                   {currentSearchState.status === "idle"
@@ -3325,6 +3327,28 @@ export default function HomePage() {
                   );
                 })
               )}
+            </div>
+            <div className="pager-row search-results-pager">
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={loadPreviousResultsPage}
+                disabled={!hasPreviousResultsPage || currentSearchState.loadingPage}
+              >
+                Prev page
+              </button>
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={loadNextResultsPage}
+                disabled={!canLoadNextResultsPage}
+              >
+                {currentSearchState.loadingPage
+                  ? "Loading..."
+                  : hasBufferedNextResultsPage
+                    ? "Next page"
+                    : "Scan more"}
+              </button>
             </div>
           </div>
         </section>
