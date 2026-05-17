@@ -429,7 +429,7 @@ async function refreshManifestScope({
 
       objects.push({
         key: entry.key,
-        versionToken: entry.etag,
+        versionToken: entry.versionToken,
         etag: entry.etag,
         size: entry.size,
         lastModified: entry.lastModified,

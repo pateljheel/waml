@@ -5,7 +5,7 @@ type GcsListFilesApiResponse = {
   prefixes?: string[];
 };
 
-function createGcsStorageClient({
+export function createGcsStorageClient({
   gcpProject,
   authMode,
   serviceAccountKeyPath,

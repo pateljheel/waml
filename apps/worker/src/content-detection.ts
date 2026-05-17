@@ -46,7 +46,6 @@ const textContentTypes = new Set([
 ]);
 const binaryContentTypePrefixes = ["image/", "audio/", "video/", "font/"];
 const binaryContentTypes = new Set([
-  "application/octet-stream",
   "application/pdf",
   "application/zip",
   "application/x-zip-compressed",

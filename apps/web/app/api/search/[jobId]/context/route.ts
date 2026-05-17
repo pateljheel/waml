@@ -6,6 +6,7 @@ import fs from "node:fs/promises";
 import { Readable } from "node:stream";
 import { createGunzip, gunzipSync } from "node:zlib";
 import { createS3Client } from "../../../../../lib/aws";
+import { createGcsStorageClient } from "../../../../../lib/storage/gcs";
 
 type ContextLine = {
   objectKey: string;
@@ -151,35 +152,59 @@ async function loadContextFromCache({
   return collected.length > 0 ? collected : null;
 }
 
-async function loadContextFromS3({
-  profile,
+async function loadContextFromObjectStore({
+  provider,
+  awsProfile,
+  gcpProject,
+  authMode,
+  serviceAccountKeyPath,
   bucket,
   objectKey,
   lineNumber,
   before,
   after,
 }: {
-  profile: string;
+  provider: StorageProvider;
+  awsProfile: string;
+  gcpProject: string;
+  authMode: "adc" | "service_account";
+  serviceAccountKeyPath: string;
   bucket: string;
   objectKey: string;
   lineNumber: number;
   before: number;
   after: number;
 }) {
-  const client = await createS3Client(profile);
-  const response = await client.send(
-    new GetObjectCommand({
-      Bucket: bucket,
-      Key: objectKey,
-    }),
-  );
-  const body = response.Body as AsyncIterable<Uint8Array | Buffer | string> | undefined;
-  const sourceStream =
-    body && typeof (body as NodeJS.ReadableStream).pipe === "function"
-      ? (body as Readable)
-      : body
-        ? Readable.from(body)
-        : undefined;
+  let sourceStream: Readable | undefined;
+
+  if (provider === "s3") {
+    const client = await createS3Client(awsProfile);
+    const response = await client.send(
+      new GetObjectCommand({
+        Bucket: bucket,
+        Key: objectKey,
+      }),
+    );
+    const body = response.Body as
+      | AsyncIterable<Uint8Array | Buffer | string>
+      | undefined;
+    sourceStream =
+      body && typeof (body as NodeJS.ReadableStream).pipe === "function"
+        ? (body as Readable)
+        : body
+          ? Readable.from(body)
+          : undefined;
+  } else {
+    const client = createGcsStorageClient({
+      gcpProject,
+      authMode,
+      serviceAccountKeyPath,
+    });
+    sourceStream = client
+      .bucket(bucket)
+      .file(objectKey)
+      .createReadStream() as Readable;
+  }
 
   if (!sourceStream) {
     return [];
@@ -285,8 +310,12 @@ export async function GET(
   const lines =
     cachedLines.length > 0
       ? cachedLines
-      : await loadContextFromS3({
-          profile: job.source.awsProfile,
+      : await loadContextFromObjectStore({
+          provider: job.source.provider,
+          awsProfile: job.source.awsProfile,
+          gcpProject: job.source.gcpProject,
+          authMode: job.source.authMode,
+          serviceAccountKeyPath: job.source.serviceAccountKeyPath,
           bucket: job.source.bucket,
           objectKey,
           lineNumber,

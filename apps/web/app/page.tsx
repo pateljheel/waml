@@ -458,7 +458,8 @@ export default function HomePage() {
     notebooks.find((notebook) => notebook.id === activeNotebookId) ?? notebooks[0];
   const providerSupportsDiscovery =
     activeNotebook.provider === "s3" || activeNotebook.provider === "gcs";
-  const providerSupportsSearch = activeNotebook.provider === "s3";
+  const providerSupportsSearch =
+    activeNotebook.provider === "s3" || activeNotebook.provider === "gcs";
   const activePartitionFiltersJson = JSON.stringify(
     activeNotebook.partitionFilters ?? {},
   );
@@ -1096,7 +1097,7 @@ export default function HomePage() {
     if (
       !providerSupportsSearch ||
       !pattern ||
-      !activeNotebook.awsProfile ||
+      (activeNotebook.provider === "s3" && !activeNotebook.awsProfile) ||
       !activeNotebook.bucket
     ) {
       return;
@@ -3284,11 +3285,6 @@ export default function HomePage() {
                     ? "Exact substring match over objects under the selected root."
                     : "All tokens must appear in a line, in any order."}
                 </p>
-                {!providerSupportsSearch ? (
-                  <p className="field-state">
-                    Search execution is currently enabled only for S3 notebooks.
-                  </p>
-                ) : null}
               </div>
               <div className="search-actions">
                 <button

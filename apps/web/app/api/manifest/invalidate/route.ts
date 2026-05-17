@@ -10,7 +10,7 @@ export async function POST(request: Request) {
   const payload = (await request.json().catch(() => null)) as
     | { provider?: StorageProvider; bucket?: string; rootPrefix?: string }
     | null;
-  const provider = payload?.provider === "s3" ? "s3" : "s3";
+  const provider = payload?.provider === "gcs" ? "gcs" : "s3";
   const bucket = payload?.bucket?.trim() ?? "";
   const rootPrefix = payload?.rootPrefix?.trim() ?? "";
 

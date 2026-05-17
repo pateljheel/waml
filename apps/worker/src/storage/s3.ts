@@ -31,6 +31,7 @@ export async function createS3ObjectStoreReader(
           .filter((entry) => Boolean(entry.Key))
           .map((entry) => ({
             key: entry.Key!,
+            versionToken: entry.ETag?.replaceAll('"', "") ?? "",
             etag: entry.ETag?.replaceAll('"', "") ?? "",
             size: entry.Size ?? 0,
             lastModified: entry.LastModified?.toISOString() ?? "",

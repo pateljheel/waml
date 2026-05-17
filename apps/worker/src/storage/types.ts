@@ -3,6 +3,7 @@ import type { Readable } from "node:stream";
 
 export type WorkerListedObject = {
   key: string;
+  versionToken: string;
   etag: string;
   size: number;
   lastModified: string;

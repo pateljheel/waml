@@ -11,7 +11,9 @@ export async function POST(request: Request) {
   const json = await request.json();
   const input = {
     provider:
-      json?.provider === "s3" ? ("s3" as StorageProvider) : ("s3" as StorageProvider),
+      json?.provider === "gcs"
+        ? ("gcs" as StorageProvider)
+        : ("s3" as StorageProvider),
     bucket: typeof json?.bucket === "string" ? json.bucket.trim() : "",
     rootPrefix:
       typeof json?.rootPrefix === "string" ? json.rootPrefix.trim() : "",
