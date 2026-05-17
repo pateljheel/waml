@@ -1287,3 +1287,57 @@ export function replaceManifestScopeObjects({
 
   return getManifestScope(bucket, rootPrefix, scopePrefix);
 }
+
+export function listManifestScopesBySourcePrefix(bucket: string, rootPrefix: string) {
+  const db = initializeDatabase();
+  const rows = db
+    .prepare(
+      `SELECT * FROM manifest_scopes
+       WHERE bucket = ? AND root_prefix = ?
+       ORDER BY scope_prefix ASC`,
+    )
+    .all(bucket, rootPrefix) as ManifestScopeRow[];
+
+  return rows.map(mapManifestScopeRow);
+}
+
+export function deleteManifestBySourcePrefix(bucket: string, rootPrefix: string) {
+  const scopes = listManifestScopesBySourcePrefix(bucket, rootPrefix);
+
+  if (scopes.length === 0) {
+    return { removedScopes: 0, removedObjects: 0 };
+  }
+
+  const db = initializeDatabase();
+  const removedObjectsRow = db
+    .prepare(
+      `SELECT COUNT(*) AS total
+       FROM manifest_objects
+       WHERE bucket = ? AND root_prefix = ?`,
+    )
+    .get(bucket, rootPrefix) as { total: number };
+
+  db.exec("BEGIN");
+
+  try {
+    db.prepare(
+      `DELETE FROM manifest_objects
+       WHERE bucket = ? AND root_prefix = ?`,
+    ).run(bucket, rootPrefix);
+
+    db.prepare(
+      `DELETE FROM manifest_scopes
+       WHERE bucket = ? AND root_prefix = ?`,
+    ).run(bucket, rootPrefix);
+
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+
+  return {
+    removedScopes: scopes.length,
+    removedObjects: removedObjectsRow.total ?? 0,
+  };
+}

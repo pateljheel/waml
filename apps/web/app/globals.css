@@ -563,8 +563,14 @@ select:focus {
   font-size: 0.71rem;
 }
 
-.search-cache-action {
+.search-summary-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   margin-left: auto;
+}
+
+.search-cache-action {
   white-space: nowrap;
 }
 

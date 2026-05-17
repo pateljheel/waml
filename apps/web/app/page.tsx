@@ -379,6 +379,9 @@ export default function HomePage() {
   const [cacheInvalidateByNotebook, setCacheInvalidateByNotebook] = useState<
     Record<string, CacheInvalidateState>
   >({});
+  const [manifestInvalidateByNotebook, setManifestInvalidateByNotebook] = useState<
+    Record<string, CacheInvalidateState>
+  >({});
 
   const activeNotebook =
     notebooks.find((notebook) => notebook.id === activeNotebookId) ?? notebooks[0];
@@ -577,6 +580,28 @@ export default function HomePage() {
       | ((current: CacheInvalidateState) => CacheInvalidateState),
   ) {
     setCacheInvalidateByNotebook((current) => {
+      const existing = current[notebookId] ?? {
+        loading: false,
+        message: null,
+        error: null,
+      };
+      const nextValue =
+        typeof updater === "function" ? updater(existing) : updater;
+
+      return {
+        ...current,
+        [notebookId]: nextValue,
+      };
+    });
+  }
+
+  function setManifestInvalidateState(
+    notebookId: string,
+    updater:
+      | CacheInvalidateState
+      | ((current: CacheInvalidateState) => CacheInvalidateState),
+  ) {
+    setManifestInvalidateByNotebook((current) => {
       const existing = current[notebookId] ?? {
         loading: false,
         message: null,
@@ -1127,6 +1152,55 @@ export default function HomePage() {
     setCacheInvalidateState(activeNotebook.id, {
       loading: false,
       message: `Removed ${payload.removedChunks ?? 0} chunks and ${payload.removedBytes ?? 0} bytes of cached artifacts.`,
+      error: null,
+    });
+  }
+
+  async function invalidateManifest() {
+    if (
+      !activeNotebook.bucket.trim() ||
+      !window.confirm(
+        `Invalidate the objects manifest for s3://${activeNotebook.bucket}/${activeNotebook.rootPrefix}?`,
+      )
+    ) {
+      return;
+    }
+
+    setManifestInvalidateState(activeNotebook.id, {
+      loading: true,
+      message: null,
+      error: null,
+    });
+
+    const response = await fetch("/api/manifest/invalidate", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        bucket: activeNotebook.bucket,
+        rootPrefix: activeNotebook.rootPrefix,
+      }),
+    });
+
+    const payload = (await response.json()) as {
+      removedScopes?: number;
+      removedObjects?: number;
+      error?: string;
+    };
+
+    if (!response.ok) {
+      setManifestInvalidateState(activeNotebook.id, {
+        loading: false,
+        message: null,
+        error: payload.error ?? "Failed to invalidate objects manifest",
+      });
+      return;
+    }
+
+    setManifestInvalidateState(activeNotebook.id, {
+      loading: false,
+      message: `Removed ${payload.removedScopes ?? 0} manifest scopes and ${payload.removedObjects ?? 0} manifest objects.`,
       error: null,
     });
   }
@@ -1690,6 +1764,12 @@ export default function HomePage() {
       message: null,
       error: null,
     };
+  const currentManifestInvalidateState =
+    manifestInvalidateByNotebook[activeNotebook.id] ?? {
+      loading: false,
+      message: null,
+      error: null,
+    };
   const currentTimePreview =
     timePreviewByNotebook[activeNotebook.id] ?? {
       loading: false,
@@ -1743,6 +1823,12 @@ export default function HomePage() {
     currentSearchState.status !== "running" &&
     currentSearchState.status !== "cancelling" &&
     !currentCacheInvalidateState.loading;
+  const canInvalidateManifest =
+    activeNotebook.bucket.trim().length > 0 &&
+    currentSearchState.status !== "queued" &&
+    currentSearchState.status !== "running" &&
+    currentSearchState.status !== "cancelling" &&
+    !currentManifestInvalidateState.loading;
 
   function clearPartitionFilter(key: string) {
     setNotebooks((currentNotebooks) =>
@@ -3075,16 +3161,28 @@ export default function HomePage() {
               <span>
                 {currentSearchState.connected ? "Live stream connected" : "Stream idle"}
               </span>
-              <button
-                type="button"
-                className="secondary-button search-cache-action"
-                onClick={invalidateCache}
-                disabled={!canInvalidateCache}
-              >
-                {currentCacheInvalidateState.loading
-                  ? "Invalidating cache..."
-                  : "Invalidate cache"}
-              </button>
+              <div className="search-summary-actions">
+                <button
+                  type="button"
+                  className="secondary-button search-cache-action"
+                  onClick={invalidateCache}
+                  disabled={!canInvalidateCache}
+                >
+                  {currentCacheInvalidateState.loading
+                    ? "Invalidating cache..."
+                    : "Invalidate cache"}
+                </button>
+                <button
+                  type="button"
+                  className="secondary-button search-cache-action"
+                  onClick={invalidateManifest}
+                  disabled={!canInvalidateManifest}
+                >
+                  {currentManifestInvalidateState.loading
+                    ? "Invalidating manifest..."
+                    : "Invalidate manifest"}
+                </button>
+              </div>
             </div>
             {currentSearchState.errorMessage ? (
               <p className="field-error">{currentSearchState.errorMessage}</p>
@@ -3095,6 +3193,14 @@ export default function HomePage() {
             {currentCacheInvalidateState.message ? (
               <p className="field-state cache-invalidate-message">
                 {currentCacheInvalidateState.message}
+              </p>
+            ) : null}
+            {currentManifestInvalidateState.error ? (
+              <p className="field-error">{currentManifestInvalidateState.error}</p>
+            ) : null}
+            {currentManifestInvalidateState.message ? (
+              <p className="field-state cache-invalidate-message">
+                {currentManifestInvalidateState.message}
               </p>
             ) : null}
             {currentSearchState.cache.recentEvents.length > 0 ? (
