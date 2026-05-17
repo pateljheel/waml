@@ -2458,7 +2458,7 @@ export default function HomePage() {
             <span className="field-state">
               {activeNotebook.provider === "s3"
                 ? "Current search and discovery implementation."
-                : "Bucket and prefix discovery are enabled. Search execution arrives in a later phase."}
+                : "Bucket browsing, search execution, and context are enabled for GCS."}
             </span>
           </div>
           {activeNotebook.provider === "s3" ? (
@@ -2512,7 +2512,7 @@ export default function HomePage() {
                   <option value="service_account">Service account key path</option>
                 </select>
                 <p className="field-state">
-                  Authentication wiring is not active yet. These settings are stored for the next provider phases.
+                  Use ADC from `gcloud auth application-default login`, or switch to a service account key file for server-side access.
                 </p>
               </div>
               {activeNotebook.authMode === "service_account" ? (
@@ -2526,6 +2526,9 @@ export default function HomePage() {
                       updateActiveNotebook("serviceAccountKeyPath", event.target.value)
                     }
                   />
+                  <p className="field-state">
+                    The path must be readable by both the web server and the worker process.
+                  </p>
                 </div>
               ) : null}
             </>

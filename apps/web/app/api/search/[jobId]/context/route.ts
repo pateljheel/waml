@@ -6,7 +6,11 @@ import fs from "node:fs/promises";
 import { Readable } from "node:stream";
 import { createGunzip, gunzipSync } from "node:zlib";
 import { createS3Client } from "../../../../../lib/aws";
-import { createGcsStorageClient } from "../../../../../lib/storage/gcs";
+import {
+  createGcsStorageClient,
+  ensureGcsAuthConfig,
+  formatGcsAuthError,
+} from "../../../../../lib/storage/gcs";
 
 type ContextLine = {
   objectKey: string;
@@ -195,15 +199,23 @@ async function loadContextFromObjectStore({
           ? Readable.from(body)
           : undefined;
   } else {
-    const client = createGcsStorageClient({
-      gcpProject,
-      authMode,
-      serviceAccountKeyPath,
-    });
-    sourceStream = client
-      .bucket(bucket)
-      .file(objectKey)
-      .createReadStream() as Readable;
+    try {
+      await ensureGcsAuthConfig({
+        authMode,
+        serviceAccountKeyPath,
+      });
+      const client = createGcsStorageClient({
+        gcpProject,
+        authMode,
+        serviceAccountKeyPath,
+      });
+      sourceStream = client
+        .bucket(bucket)
+        .file(objectKey)
+        .createReadStream() as Readable;
+    } catch (error) {
+      throw new Error(formatGcsAuthError(error));
+    }
   }
 
   if (!sourceStream) {
