@@ -1,277 +1,346 @@
 # WAML
 
-WAML is a web application for grep-like search over logs stored in S3.
-
-## Workspace Layout
-
-- `apps/web`: Next.js application
-- `apps/worker`: long-lived search worker
-- `packages/shared`: shared types and query contracts
-- `packages/db`: SQLite paths, schema setup, and job helpers
-- `var/cache`: local cache artifacts
-- `var/data`: local SQLite database files
+WAML is a notebook-style log investigation application for object storage.
+
+It lets you search logs in:
+- Amazon S3
+- Google Cloud Storage
+
+The current product combines:
+- notebook-scoped source configuration
+- dynamic partition inference from object paths
+- time-aware search pruning
+- paginated lazy search execution
+- local cache and manifest reuse
+- inline context around matched log lines
+
+## What WAML Does
 
-## Initial Setup
+WAML is built for large log archives stored as objects rather than in a traditional log index.
 
-1. Install dependencies with `pnpm install`.
-2. Start the web app with `pnpm dev:web`.
-3. Start the worker with `pnpm dev:worker`.
+A notebook in WAML defines:
+- a storage provider
+- a bucket
+- a root prefix
+- optional custom path parsing rules
+- partition filters
+- time configuration
+- a search query
 
-This scaffold includes a SQLite-backed job skeleton that both processes can share.
+The worker then scans matching objects, streams results back to the UI, and builds reusable local cache artifacts while it searches.
 
-## Current Scaling Bottlenecks
+## Current Capabilities
 
-The current implementation works for targeted exploration, but a few scale limits are still important:
+### Search
 
-- Search execution still lists S3 objects under the selected prefix on each run.
-  A persisted object manifest in SQLite does not exist yet, so very large prefixes will incur repeated `ListObjectsV2` cost.
-- Results pagination currently uses SQLite `OFFSET`.
-  This is fine for early pages, but deep pagination should move to cursor or sequence-based paging.
-- Context lookup is still linear within an object.
-  Showing surrounding lines currently requires counting through cached text or streamed object text by line number.
-- Warm-cache reads still decompress full cached chunks after the trigram prefilter passes.
-  This keeps the implementation simple, but large chunks still have non-trivial warm-hit cost.
-- Search pause and resume happens at coarse boundaries.
-  The worker can pause after buffering enough results, but resume is still driven by S3 listing progress rather than a finer object or chunk cursor.
-- Dynamic partition value search is UI-paginated but still backend-scan-backed.
-  High-cardinality filter keys need a persisted manifest or value index to scale cleanly.
-- Cache eviction runs inline in the worker path.
-  Under heavier churn, eviction should move toward a more incremental or background-oriented model.
+- substring search
+- unordered `all tokens` search
+- case-sensitive or case-insensitive matching
+- paginated lazy result loading
+- cancelable searches
+- time-range filtering
+- inline log context around hits
 
-## Likely Next Fixes
+### Storage Providers
 
-- Add a SQLite object manifest keyed by `bucket + rootPrefix + objectKey`. - Done
-- Replace `OFFSET` result paging with cursor or sequence-based paging. - Done
-- Add chunk line-range metadata for faster context lookup. - Done
-- Improve pause and resume granularity to object or chunk level. - Done at object level
-- Persist partition value indexes instead of deriving them from repeated S3 scans.
+- S3
+  - bucket browsing
+  - prefix browsing
+  - search execution
+  - context lookup
+  - cache + manifest invalidation
 
+- GCS
+  - bucket browsing
+  - prefix browsing
+  - search execution
+  - context lookup
+  - cache + manifest invalidation
 
+### Path and Partition Handling
 
-› How can we improve it without implementing partintion index
+- Hive-style partition inference from `key=value` path segments
+- custom path pattern parsing for directories and filenames
+- dynamic partition filters
+- category filters with multi-select
+- range filters with value mode or inclusive start/end bounds
+- partition-to-time mapping for coarse time pruning
 
+### Performance Features
 
-• Yes. You can improve it a lot without building a full partition index.
+- SQLite-backed search jobs
+- local object manifest per scoped search prefix
+- local compressed chunk cache
+- chunk trigram prefilter
+- cache invalidation
+- manifest invalidation
 
-  Best improvements:
+## Repository Layout
 
-  - derive discovery prefixes from the custom pattern
-      - don’t recurse blindly from rootPrefix
-      - use fixed literal segments and already-selected filter values to jump directly to narrower
-        prefixes
-      - this is the biggest win
-  - make traversal pattern-aware
-      - stop exploring branches that cannot match the custom pattern
-      - if the pattern expects year_month=.../DD-HH-...log, don’t walk unrelated shapes
-  - use progressive depth loading
-      - infer only the first few filter levels initially
-      - load deeper levels only after earlier filters are selected
-      - this avoids discovering the whole tree up front
-  - cascade filter values
-      - once service=foo is selected, load values for year_month only under that narrowed scope
-      - same for day, then hour
-      - much cheaper than global value discovery
-  - separate “definition inference” from “value enumeration”
-      - infer keys from a small sample
-      - fetch values lazily per key only when the dropdown is opened
-      - you already do part of this; the backend can still get much narrower
-  - increase reliance on time mappings
-      - if time fields are mapped, derive candidate prefixes from the selected time range
-      - this removes huge parts of the tree before filter discovery even starts
-  - cache recent inference results in memory or SQLite with short TTL
-      - not a full partition index
-      - just memoize recent (bucket, rootPrefix, pathPattern, selectedFilters) results
-      - useful for repeated UI interactions
-  - use S3 Delimiter="/" aggressively for intermediate levels
-      - browse level by level instead of collecting full relative paths
-      - cheaper and more controllable
-  - add explicit scope limits in UX
-      - require a narrower root prefix or time range before loading deep filters
-      - this is pragmatic and often necessary
+- `apps/web`
+  - Next.js application
+  - notebook UI
+  - storage discovery routes
+  - search and context APIs
 
-  If I had to prioritize without building a partition index:
+- `apps/worker`
+  - long-lived search worker
+  - S3 and GCS object streaming
+  - manifest refresh
+  - cache build and reuse
 
-  1. pattern-aware prefix derivation
-  2. cascading lazy filter loading
-  3. time-range-based prefix narrowing
-  4. short-TTL cached inference results
+- `packages/shared`
+  - shared schemas and types
 
+- `packages/db`
+  - SQLite schema
+  - job, result, cache, and manifest helpers
 
+- `fixtures`
+  - local sample data and helper docs
 
-› What will be the implementation pahses
+- `var/data`
+  - SQLite database files
 
+- `var/cache`
+  - local cached chunk artifacts
 
-• Use phased delivery so S3 keeps working the whole time.
+## Requirements
 
-  ## Phase 1: Source Model
+- Node.js 22
+- pnpm 10
 
-  Goal: make provider an explicit concept everywhere.
+Cloud access depends on the provider you use:
 
-  Changes:
+### AWS
 
-  - add provider: "s3" to current notebook/source schema
-  - add provider to shared types
-  - add provider to search jobs
-  - add provider to manifest/cache DB schema
+WAML expects local AWS credentials/profile access for the web app and worker.
 
-  Outcome:
+Typical setup:
+- `~/.aws/config`
+- `~/.aws/credentials`
+- `aws sso login` or another supported profile flow
 
-  - no behavior change yet
-  - current system still only supports S3
-  - but all persisted identity becomes provider-aware
+### GCP
 
-  ## Phase 2: Storage Abstraction
+WAML currently supports:
+- Application Default Credentials
+- service account key path
 
-  Goal: stop calling AWS-specific code directly from product logic.
+Typical ADC setup:
 
-  Changes:
+```bash
+gcloud auth application-default login
+```
 
-  - define provider-neutral interfaces for:
-      - list buckets
-      - list prefixes
-      - list objects
-      - get object stream
-  - move current AWS implementation behind s3 adapter
-  - change web discovery routes to call storage abstraction
-  - change worker listing/streaming to call storage abstraction
+Or use a service account key file and configure its path in the notebook source settings.
 
-  Outcome:
+## Installation
 
-  - still only S3 in practice
-  - but the app is no longer architecturally AWS-only
+```bash
+pnpm install
+```
 
-  ## Phase 3: Provider-Neutral Identity
+## Running Locally
 
-  Goal: make cache and manifest safe across providers.
+Start the web app:
 
-  Changes:
+```bash
+pnpm dev:web
+```
 
-  - normalize object identity into:
-      - provider
-      - bucket
-      - key
-      - version token
-  - update chunk cache keys
-  - update manifest scope/object keys
-  - update invalidation routes and helper queries
+Start the worker in a separate terminal:
 
-  Outcome:
+```bash
+pnpm dev:worker
+```
 
-  - cache/manifest no longer assume S3-only semantics
-  - groundwork for GCS versioning/generation support
+Typecheck everything:
 
-  ## Phase 4: UI Provider Switch
+```bash
+pnpm typecheck
+```
 
-  Goal: let notebooks choose storage provider.
+Build everything:
 
-  Changes:
+```bash
+pnpm build
+```
 
-  - add provider selector in notebook source config
-  - keep S3 as default
-  - show provider-specific fields conditionally
-  - initially:
-      - S3 fields unchanged
-      - GCS fields can be disabled/hidden until backend is ready
+## How To Use WAML
 
-  Outcome:
+### 1. Create or select a notebook
 
-  - UI understands multiple providers
-  - only S3 path is functional at first
+Each notebook is an isolated investigation workspace.
 
-  ## Phase 5: GCS Read-Only Discovery
+### 2. Choose a storage provider
 
-  Goal: get GCS browsing working before search.
+Select:
+- `Amazon S3`
+- `Google Cloud Storage`
 
-  Changes:
+### 3. Configure the source
 
-  - implement GCS adapter for:
-      - list buckets
-      - list prefixes
-      - list objects
-  - add GCS auth support, preferably ADC first
-  - wire provider-neutral routes to GCS adapter
+For S3:
+- AWS profile
+- bucket
+- root prefix
 
-  Outcome:
+For GCS:
+- GCP project (optional depending on your auth setup)
+- auth mode
+- bucket
+- root prefix
 
-  - notebook can browse GCS bucket/prefix structure
-  - partition inference works on GCS
-  - search execution still may remain S3-only temporarily
+### 4. Optional: define a custom path pattern
 
-  ## Phase 6: GCS Search Execution
+Examples:
 
-  Goal: search GCS objects the same way as S3.
+```text
+service={category:service}/year_month={range:year_month}/{range:day}-{range:hour}-{category:file_id}.log
+```
 
-  Changes:
+```text
+env={category:env}/year={range:year}/month={range:month}
+```
 
-  - implement GCS object streaming in worker
-  - map GCS object metadata to normalized object identity
-  - support content-type checks and gzip handling
-  - make manifest loading work for GCS
-  - make cache writes/reads provider-aware
+Custom path patterns let WAML infer partitions from:
+- directory names
+- file names
 
-  Outcome:
+### 5. Review dynamic filters
 
-  - full substring search works on GCS
-  - cache and manifest work for both providers
+WAML will infer filter keys from object paths and let you:
+- rename them
+- hide them
+- override type as category or range
+- select multiple category values
+- set range bounds
 
-  ## Phase 7: GCS Context + Invalidation
+### 6. Configure time behavior
 
-  Goal: complete parity for investigation workflow.
+Map partition keys into time components such as:
+- year
+- month
+- day
+- hour
+- date
+- datetime
 
-  Changes:
+You can also configure how timestamps are parsed from log lines.
 
-  - context lookup from GCS cached text / live object reads
-  - manifest invalidation for GCS source scopes
-  - cache invalidation for GCS source scopes
+### 7. Run a search
 
-  Outcome:
+Enter:
+- a query
+- a mode
+  - `Substring`
+  - `All tokens`
+- optional time range
+- page size
+- context line count
 
-  - user-facing feature parity between S3 and GCS
+Then run the search.
 
-  ## Phase 8: Auth Hardening
+### 8. Review results
 
-  Goal: make GCS usable in real environments.
+WAML shows:
+- job state
+- match count
+- bytes scanned
+- object count
+- cache hit/miss/write/eviction counters
+- paginated results
 
-  Changes:
+### 9. Open context
 
-  - ADC support
-  - optional service account key path support
-  - better auth error messages
-  - provider-specific credential refresh handling
+Each result can expand to show surrounding lines from the same object.
 
-  Outcome:
+### 10. Manage local state
 
-  - stable production-ready auth flow
+You can invalidate:
+- cache
+- object manifest
 
-  ## Recommended milestone cuts
+for the current notebook source scope.
 
-  Smallest safe milestone:
+## Search Model
 
-  1. Phase 1
-  2. Phase 2
-  3. Phase 3
+WAML does not rely on a central remote full-text service.
 
-  That gives you a provider-ready architecture without changing functionality much.
+Instead it:
+- discovers candidate objects
+- prunes by prefix, partition filters, and time range
+- streams matching objects
+- writes local cache artifacts while searching
 
-  First visible multi-provider milestone:
-  4. Phase 4
-  5. Phase 5
+Searches are:
+- resumable within the current lazy paging model
+- pausable after buffering enough results
+- cancelable
 
-  Full GCS support milestone:
-  6. Phase 6
-  7. Phase 7
-  8. Phase 8
+## Time Model
 
-  ## Practical recommendation
+WAML uses a universal time-range model:
+- `startTime`
+- `endTime`
 
-  Do not jump straight to GCS implementation.
+It combines:
+- coarse object pruning from path-derived time
+- exact line filtering from parsed log timestamps
 
-  Do:
+If line timestamp parsing is disabled, time filtering relies on coarse object pruning only.
 
-  - Phase 1 to 3 first
-  - keep them S3-only behaviorally
-  - then add GCS on top
+## Cache and Manifest
 
-  That reduces risk a lot.
+### Cache
 
-  If you want, I can next turn this into a concrete task breakdown by file and schema change.
+WAML maintains a local chunk cache under `var/cache`.
+
+It stores:
+- compressed cached text
+- compact trigram artifacts
+- per-chunk metadata in SQLite
+
+Default cache budget:
+- `512 MB`
+
+Override with:
+
+```bash
+WAML_INDEX_CACHE_MAX_BYTES=5368709120
+```
+
+### Manifest
+
+WAML also maintains scoped object manifests in SQLite to reduce repeated object listing work.
+
+Manifest behavior:
+- scoped by source and derived search window
+- refreshed more aggressively for recent windows
+- reusable for repeated searches
+
+## Environment Notes
+
+### AWS credentials refresh
+
+WAML is designed to pick up refreshed AWS credentials without restarting the web or worker processes.
+
+### GCS auth behavior
+
+For GCS:
+- ADC failures surface with guidance
+- missing service account key paths fail fast
+- permission failures are surfaced explicitly
+
+## Known Limitations
+
+- result ordering is effectively key-order streaming, not a global timestamp sort
+- partition inference is still discovery-based, not backed by a persisted partition value index
+- same-object context is supported; cross-object spillover context is not enabled
+- WAML is optimized for targeted investigation, not as a replacement for a full remote indexing system
+
+## Additional Docs
+
+- [WAML_V1_ARCHITECTURE.md](/home/jheel/waml/WAML_V1_ARCHITECTURE.md)
+
