@@ -1,0 +1,55 @@
+services:
+  web:
+    build:
+      context: .
+      target: web
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      WAML_HEALTH_DIR: /app/var/health
+    depends_on:
+      worker:
+        condition: service_healthy
+    volumes:
+      - waml_data:/app/var/data
+      - waml_cache:/app/var/cache
+      - waml_health:/app/var/health
+      - ${HOME}/.aws:/root/.aws
+      - ${HOME}/.config/gcloud:/root/.config/gcloud:ro
+    healthcheck:
+      test: ["CMD", "/app/docker/web-healthcheck.sh"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      target: worker
+    environment:
+      NODE_ENV: production
+      WAML_HEALTH_DIR: /app/var/health
+      WAML_WORKER_HEARTBEAT_FILE: /app/var/health/worker-heartbeat
+      WAML_WORKER_HEALTH_MAX_AGE_MS: 15000
+    volumes:
+      - waml_data:/app/var/data
+      - waml_cache:/app/var/cache
+      - waml_health:/app/var/health
+      - ${HOME}/.aws:/root/.aws
+      - ${HOME}/.config/gcloud:/root/.config/gcloud:ro
+    healthcheck:
+      test: ["CMD", "/app/docker/worker-healthcheck.sh"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
+volumes:
+  waml_data:
+  waml_cache:
+  waml_health:

@@ -1,0 +1,11 @@
+node_modules
+.git
+.gitignore
+apps/web/.next
+apps/**/dist
+packages/**/dist
+**/*.tsbuildinfo
+var/data
+var/cache
+pnpm-debug.log
+*.log

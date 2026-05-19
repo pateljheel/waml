@@ -167,6 +167,60 @@ Build everything:
 pnpm build
 ```
 
+## Running With Docker
+
+WAML includes:
+- `Dockerfile`
+- `docker-compose.yml`
+
+The container setup runs two services:
+- `web`
+- `worker`
+
+They share Docker volumes for:
+- SQLite data
+- local cache artifacts
+
+Start everything:
+
+```bash
+docker compose up --build
+```
+
+Then open:
+
+```text
+http://localhost:3000
+```
+
+Current container behavior:
+- the web service runs the built Next.js app
+- the worker service runs the compiled Node.js worker
+- AWS and GCP credentials are mounted from the host by default
+
+Default mounts in `docker-compose.yml`:
+- `${HOME}/.aws:/root/.aws`
+- `${HOME}/.config/gcloud:/root/.config/gcloud:ro`
+
+AWS is mounted writable on purpose so SSO and `aws login` token refresh can update cache files inside the container.
+
+Docker volumes:
+- `waml_data`
+- `waml_cache`
+- `waml_health`
+
+Stop everything:
+
+```bash
+docker compose down
+```
+
+Remove containers plus volumes:
+
+```bash
+docker compose down -v
+```
+
 ## How To Use WAML
 
 ### 1. Create or select a notebook
@@ -343,4 +397,3 @@ For GCS:
 ## Additional Docs
 
 - [WAML_V1_ARCHITECTURE.md](/home/jheel/waml/WAML_V1_ARCHITECTURE.md)
-

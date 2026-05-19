@@ -61,6 +61,7 @@ import {
 import { createObjectStoreReader } from "./storage";
 import fsSync from "node:fs";
 import fs from "node:fs/promises";
+import path from "node:path";
 import { Readable } from "node:stream";
 import { createGunzip } from "node:zlib";
 const pollIntervalMs = 600;
@@ -69,6 +70,10 @@ const matchFlushIntervalMs = 250;
 const matchFlushSize = 50;
 const cacheChunkLineLimit = 2000;
 const cacheChunkTextBytesLimit = 512 * 1024;
+const workerHealthDirectory = process.env.WAML_HEALTH_DIR || path.join("var", "health");
+const workerHeartbeatFile =
+  process.env.WAML_WORKER_HEARTBEAT_FILE ||
+  path.join(workerHealthDirectory, "worker-heartbeat");
 
 function sleep(durationMs: number) {
   return new Promise((resolve) => {
@@ -927,9 +932,15 @@ async function processNextJob() {
   return true;
 }
 
+async function updateWorkerHeartbeat() {
+  await fs.mkdir(path.dirname(workerHeartbeatFile), { recursive: true });
+  await fs.writeFile(workerHeartbeatFile, `${Date.now()}\n`);
+}
+
 async function main() {
   ensureRuntimeDirectories();
   initializeDatabase();
+  await updateWorkerHeartbeat();
 
   const startupDetails = {
     db: getDatabaseFilePath(),
@@ -942,6 +953,7 @@ async function main() {
 
   while (true) {
     const processed = await processNextJob();
+    await updateWorkerHeartbeat();
 
     if (!processed) {
       await sleep(pollIntervalMs);
