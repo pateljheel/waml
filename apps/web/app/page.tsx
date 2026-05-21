@@ -3413,7 +3413,9 @@ export default function HomePage() {
                 <p className="field-state">
                   {activeNotebook.queryMode === "substring"
                     ? "Exact substring match over objects under the selected root."
-                    : "All tokens must appear in a line, in any order."}
+                    : activeNotebook.queryMode === "all_tokens"
+                      ? "All tokens must appear in a line, in any order."
+                      : 'Token-aware full-text search with quoted phrases and -excluded terms.'}
                 </p>
               </div>
               <div className="search-actions">
@@ -3447,6 +3449,7 @@ export default function HomePage() {
                 >
                   <option value="substring">Substring</option>
                   <option value="all_tokens">All tokens</option>
+                  <option value="full_text">Full text</option>
                 </select>
                 <input
                   id="search-pattern"
@@ -3454,7 +3457,9 @@ export default function HomePage() {
                   placeholder={
                     activeNotebook.queryMode === "substring"
                       ? "Search for an exact substring"
-                      : "Enter tokens separated by spaces"
+                      : activeNotebook.queryMode === "all_tokens"
+                        ? "Enter tokens separated by spaces"
+                        : 'Enter terms, "quoted phrases", and -excluded terms'
                   }
                   onChange={(event) =>
                     updateActiveNotebook("query", event.target.value)

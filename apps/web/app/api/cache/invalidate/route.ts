@@ -43,6 +43,9 @@ export async function POST(request: Request) {
       chunk.textCachePath
         ? fs.rm(chunk.textCachePath, { force: true })
         : Promise.resolve(),
+      chunk.tokenIndexPath
+        ? fs.rm(chunk.tokenIndexPath, { force: true })
+        : Promise.resolve(),
     ]),
   );
 

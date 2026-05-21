@@ -36,13 +36,17 @@ import type { SearchJob, SearchMatch } from "@waml/shared";
 import {
   addTrigrams,
   buildPatternTrigrams,
+  buildTokenPostingIndex,
   createObjectCacheKey,
+  getCandidateLineNumbersFromTokenIndex,
   getCacheBudgetBytes,
   getObjectCachePaths,
   packedTrigramArtifactContainsAll,
   readCompressedTextArtifact,
   shouldUseTrigramPrefilter,
+  tokenizeText,
   writeCompressedTextArtifact,
+  writeCompressedTokenIndexArtifact,
   writePackedTrigramArtifact,
 } from "./cache";
 import {
@@ -75,10 +79,93 @@ const workerHeartbeatFile =
   process.env.WAML_WORKER_HEARTBEAT_FILE ||
   path.join(workerHealthDirectory, "worker-heartbeat");
 
+type FullTextQuery = {
+  includeTokens: string[];
+  excludeTokens: string[];
+  includePhrases: string[];
+  excludePhrases: string[];
+  prefilterTokens: string[];
+};
+
+type SearchMatcher = {
+  matches(lineText: string): boolean;
+  prefilterTokens: string[];
+};
+
 function sleep(durationMs: number) {
   return new Promise((resolve) => {
     setTimeout(resolve, durationMs);
   });
+}
+
+function tokenizeLineForMatch(value: string, caseSensitive: boolean) {
+  const matches = value.match(/[A-Za-z0-9_]+/g);
+
+  if (!matches) {
+    return [];
+  }
+
+  return caseSensitive ? matches : matches.map((token) => token.toLocaleLowerCase());
+}
+
+function parseFullTextQuery(pattern: string, caseSensitive: boolean): FullTextQuery {
+  const parts = pattern.match(/-?"[^"]+"|-?\S+/g) ?? [];
+  const includeTokens = new Set<string>();
+  const excludeTokens = new Set<string>();
+  const includePhrases = new Set<string>();
+  const excludePhrases = new Set<string>();
+  const prefilterTokens = new Set<string>();
+
+  for (const part of parts) {
+    const negative = part.startsWith("-");
+    const body = negative ? part.slice(1) : part;
+
+    if (!body) {
+      continue;
+    }
+
+    if (body.startsWith("\"") && body.endsWith("\"") && body.length >= 2) {
+      const phrase = body.slice(1, -1);
+      const normalizedPhrase = caseSensitive ? phrase : phrase.toLocaleLowerCase();
+
+      if (!normalizedPhrase) {
+        continue;
+      }
+
+      if (negative) {
+        excludePhrases.add(normalizedPhrase);
+      } else {
+        includePhrases.add(normalizedPhrase);
+
+        for (const token of tokenizeText(phrase)) {
+          prefilterTokens.add(token);
+        }
+      }
+
+      continue;
+    }
+
+    const normalizedToken = caseSensitive ? body : body.toLocaleLowerCase();
+
+    if (!normalizedToken) {
+      continue;
+    }
+
+    if (negative) {
+      excludeTokens.add(normalizedToken);
+    } else {
+      includeTokens.add(normalizedToken);
+      prefilterTokens.add(normalizedToken.toLocaleLowerCase());
+    }
+  }
+
+  return {
+    includeTokens: [...includeTokens],
+    excludeTokens: [...excludeTokens],
+    includePhrases: [...includePhrases],
+    excludePhrases: [...excludePhrases],
+    prefilterTokens: [...prefilterTokens],
+  };
 }
 
 async function scanCachedTextFile({
@@ -87,6 +174,8 @@ async function scanCachedTextFile({
   objectKey,
   versionToken,
   etag,
+  baseLineNumber,
+  candidateLineNumbers,
   progress,
   pendingMatches,
   lastProgressAt,
@@ -99,6 +188,8 @@ async function scanCachedTextFile({
   objectKey: string;
   versionToken: string;
   etag: string;
+  baseLineNumber: number;
+  candidateLineNumbers: Set<number> | null;
   progress: SearchJob["progress"];
   pendingMatches: SearchMatch[];
   lastProgressAt: { value: number };
@@ -106,11 +197,15 @@ async function scanCachedTextFile({
   queryStartEpochMs: number | null;
   queryEndEpochMs: number | null;
 }) {
-  const matcher = createSubstringMatcher(job);
+  const matcher = createSearchMatcher(job);
   const text = await readCompressedTextArtifact(filepath);
-  let lineNumber = 0;
+  let lineNumber = baseLineNumber - 1;
   progress.bytesScanned += Buffer.byteLength(text);
   const lines = text.split(/\r?\n/);
+
+  if (lines.at(-1) === "") {
+    lines.pop();
+  }
 
   for (const lineText of lines) {
     if (isJobCancellationRequested(job.id)) {
@@ -118,6 +213,10 @@ async function scanCachedTextFile({
     }
 
     lineNumber += 1;
+
+    if (candidateLineNumbers && !candidateLineNumbers.has(lineNumber)) {
+      continue;
+    }
 
     if (!matcher.matches(lineText)) {
       continue;
@@ -185,6 +284,7 @@ async function writeCachedChunkArtifact({
   chunkText,
   byteStart,
   byteEnd,
+  lineCount,
   startLineNumber,
   endLineNumber,
   minTimestampMs,
@@ -199,6 +299,7 @@ async function writeCachedChunkArtifact({
   chunkText: string;
   byteStart: number;
   byteEnd: number;
+  lineCount: number;
   startLineNumber: number | null;
   endLineNumber: number | null;
   minTimestampMs: number | null;
@@ -214,23 +315,26 @@ async function writeCachedChunkArtifact({
   const cachePaths = getObjectCachePaths(chunkPk);
   const tempTextPath = `${cachePaths.textPath}.${process.pid}.tmp`;
   const tempTrigramPath = `${cachePaths.trigramPath}.${process.pid}.tmp`;
+  const tempTokenIndexPath = `${cachePaths.tokenIndexPath}.${process.pid}.tmp`;
   const trigramSet = new Set<number>();
   addTrigrams(trigramSet, chunkText);
+  const tokenIndex = buildTokenPostingIndex(chunkText, startLineNumber ?? 1);
 
   await fs.mkdir(cachePaths.directory, { recursive: true });
   await writeCompressedTextArtifact(tempTextPath, chunkText);
   await writePackedTrigramArtifact(tempTrigramPath, trigramSet);
+  await writeCompressedTokenIndexArtifact(tempTokenIndexPath, tokenIndex);
   await fs.rename(tempTextPath, cachePaths.textPath);
   await fs.rename(tempTrigramPath, cachePaths.trigramPath);
+  await fs.rename(tempTokenIndexPath, cachePaths.tokenIndexPath);
 
-  const [textStats, trigramStats] = await Promise.all([
+  const [textStats, trigramStats, tokenIndexStats] = await Promise.all([
     fs.stat(cachePaths.textPath),
     fs.stat(cachePaths.trigramPath),
+    fs.stat(cachePaths.tokenIndexPath),
   ]);
 
-  const cacheSizeBytes = textStats.size + trigramStats.size;
-  const lineCount =
-    chunkText.length === 0 ? 0 : chunkText.split(/\r?\n/).length;
+  const cacheSizeBytes = textStats.size + trigramStats.size + tokenIndexStats.size;
 
   upsertCacheChunk({
     chunkPk,
@@ -246,8 +350,10 @@ async function writeCachedChunkArtifact({
     endLineNumber,
     artifactPath: cachePaths.trigramPath,
     textCachePath: cachePaths.textPath,
+    tokenIndexPath: cachePaths.tokenIndexPath,
     cacheSizeBytes,
     trigramCount: trigramSet.size,
+    tokenCount: tokenIndex.size,
     lineCount,
     minTimestampMs,
     maxTimestampMs,
@@ -258,6 +364,7 @@ async function writeCachedChunkArtifact({
     chunkId,
     cacheSizeBytes,
     trigramCount: trigramSet.size,
+    tokenCount: tokenIndex.size,
   });
 }
 
@@ -287,6 +394,9 @@ async function enforceCacheBudget(jobId: string) {
       removed.textCachePath
         ? fs.rm(removed.textCachePath, { force: true })
         : Promise.resolve(),
+      removed.tokenIndexPath
+        ? fs.rm(removed.tokenIndexPath, { force: true })
+        : Promise.resolve(),
     ]);
 
     totalBytes -= removed.cacheSizeBytes;
@@ -299,7 +409,7 @@ async function enforceCacheBudget(jobId: string) {
   }
 }
 
-function createSubstringMatcher(job: SearchJob) {
+function createSearchMatcher(job: SearchJob): SearchMatcher {
   const caseSensitive = job.searchOptions.caseSensitive;
   const normalizedPattern = caseSensitive
     ? job.pattern
@@ -311,11 +421,41 @@ function createSubstringMatcher(job: SearchJob) {
           .map((token) => token.trim())
           .filter(Boolean)
       : [];
+  const fullTextQuery =
+    job.mode === "full_text"
+      ? parseFullTextQuery(job.pattern, caseSensitive)
+      : null;
 
   return {
-    caseSensitive,
+    prefilterTokens: !caseSensitive && fullTextQuery ? fullTextQuery.prefilterTokens : [],
     matches(lineText: string) {
       const haystack = caseSensitive ? lineText : lineText.toLocaleLowerCase();
+
+      if (job.mode === "full_text" && fullTextQuery) {
+        const tokenSet = new Set(tokenizeLineForMatch(lineText, caseSensitive));
+
+        if (fullTextQuery.includeTokens.some((token) => !tokenSet.has(token))) {
+          return false;
+        }
+
+        if (fullTextQuery.excludeTokens.some((token) => tokenSet.has(token))) {
+          return false;
+        }
+
+        if (
+          fullTextQuery.includePhrases.some((phrase) => !haystack.includes(phrase))
+        ) {
+          return false;
+        }
+
+        if (
+          fullTextQuery.excludePhrases.some((phrase) => haystack.includes(phrase))
+        ) {
+          return false;
+        }
+
+        return true;
+      }
 
       if (job.mode === "all_tokens") {
         return normalizedTokens.every((token) => haystack.includes(token));
@@ -379,9 +519,10 @@ async function processObject({
   queryStartEpochMs: number | null;
   queryEndEpochMs: number | null;
 }) {
-  const matcher = createSubstringMatcher(job);
+  const matcher = createSearchMatcher(job);
   const gzipObject = isGzipObject(objectKey);
-  const patternTrigrams = shouldUseTrigramPrefilter(job)
+  const patternTrigrams =
+    job.mode !== "full_text" && shouldUseTrigramPrefilter(job)
     ? buildPatternTrigrams(job.pattern)
     : null;
   const cachedChunks = listCacheChunksForObject(
@@ -424,6 +565,8 @@ async function processObject({
     for (const cachedChunk of validCachedChunks) {
       const chunkPk = cachedChunk.chunkPk;
       let trigramRejected = false;
+      let tokenIndexRejected = false;
+      let candidateLineNumbers: Set<number> | null = null;
       const chunkTimePruned =
         (queryStartEpochMs !== null || queryEndEpochMs !== null) &&
         cachedChunk.minTimestampMs !== null &&
@@ -448,6 +591,26 @@ async function processObject({
         }
       }
 
+      if (
+        !chunkTimePruned &&
+        !trigramRejected &&
+        job.mode === "full_text" &&
+        matcher.prefilterTokens.length > 0 &&
+        cachedChunk.tokenIndexPath
+      ) {
+        try {
+          candidateLineNumbers = await getCandidateLineNumbersFromTokenIndex(
+            cachedChunk.tokenIndexPath,
+            matcher.prefilterTokens,
+          );
+          tokenIndexRejected =
+            candidateLineNumbers !== null && candidateLineNumbers.size === 0;
+        } catch {
+          candidateLineNumbers = null;
+          tokenIndexRejected = false;
+        }
+      }
+
       if (chunkTimePruned) {
         appendJobEvent(job.id, "object.skipped", {
           objectKey,
@@ -462,14 +625,22 @@ async function processObject({
         chunkPk,
         chunkId: cachedChunk.chunkId,
         trigramRejected,
+        tokenIndexRejected,
         timePruned: chunkTimePruned,
       });
 
-      if (chunkTimePruned || trigramRejected) {
+      if (chunkTimePruned || trigramRejected || tokenIndexRejected) {
         if (trigramRejected) {
           appendJobEvent(job.id, "object.skipped", {
             objectKey,
             reason: "cache_trigram_prune",
+            chunkId: cachedChunk.chunkId,
+          });
+        }
+        if (tokenIndexRejected) {
+          appendJobEvent(job.id, "object.skipped", {
+            objectKey,
+            reason: "cache_token_prune",
             chunkId: cachedChunk.chunkId,
           });
         }
@@ -489,6 +660,8 @@ async function processObject({
         objectKey,
         versionToken,
         etag,
+        baseLineNumber: cachedChunk.startLineNumber ?? 1,
+        candidateLineNumbers,
         progress,
         pendingMatches,
         lastProgressAt,
@@ -512,6 +685,9 @@ async function processObject({
         fs.rm(chunk.artifactPath, { force: true }),
         chunk.textCachePath
           ? fs.rm(chunk.textCachePath, { force: true })
+          : Promise.resolve(),
+        chunk.tokenIndexPath
+          ? fs.rm(chunk.tokenIndexPath, { force: true })
           : Promise.resolve(),
       ]),
     );
@@ -610,6 +786,7 @@ async function processObject({
       chunkText,
       byteStart: chunkByteStart,
       byteEnd: chunkByteStart + chunkTextBytes,
+      lineCount: chunkLineCount,
       startLineNumber: chunkStartLineNumber,
       endLineNumber:
         chunkStartLineNumber === null

@@ -90,8 +90,10 @@ type ChunkRow = {
   end_line_number: number | null;
   artifact_path: string;
   text_cache_path: string | null;
+  token_index_path: string | null;
   cache_size_bytes: number;
   trigram_count: number;
+  token_count: number;
   line_count: number;
   min_timestamp_ms: number | null;
   max_timestamp_ms: number | null;
@@ -136,8 +138,10 @@ export type CacheChunkRecord = {
   endLineNumber: number | null;
   artifactPath: string;
   textCachePath: string | null;
+  tokenIndexPath: string | null;
   cacheSizeBytes: number;
   trigramCount: number;
+  tokenCount: number;
   lineCount: number;
   minTimestampMs: number | null;
   maxTimestampMs: number | null;
@@ -325,8 +329,10 @@ export function initializeDatabase() {
       end_line_number INTEGER,
       artifact_path TEXT NOT NULL,
       text_cache_path TEXT,
+      token_index_path TEXT,
       cache_size_bytes INTEGER NOT NULL DEFAULT 0,
       trigram_count INTEGER NOT NULL DEFAULT 0,
+      token_count INTEGER NOT NULL DEFAULT 0,
       line_count INTEGER NOT NULL DEFAULT 0,
       min_timestamp_ms INTEGER,
       max_timestamp_ms INTEGER,
@@ -422,10 +428,12 @@ export function initializeDatabase() {
     "cache_size_bytes",
     "cache_size_bytes INTEGER NOT NULL DEFAULT 0",
   );
+  ensureColumn(db, "chunks", "token_index_path", "token_index_path TEXT");
   ensureColumn(db, "chunks", "min_timestamp_ms", "min_timestamp_ms INTEGER");
   ensureColumn(db, "chunks", "max_timestamp_ms", "max_timestamp_ms INTEGER");
   ensureColumn(db, "chunks", "start_line_number", "start_line_number INTEGER");
   ensureColumn(db, "chunks", "end_line_number", "end_line_number INTEGER");
+  ensureColumn(db, "chunks", "token_count", "token_count INTEGER NOT NULL DEFAULT 0");
   ensureColumn(
     db,
     "job_results",
@@ -469,8 +477,10 @@ function mapChunkRow(row: ChunkRow): CacheChunkRecord {
     endLineNumber: row.end_line_number,
     artifactPath: row.artifact_path,
     textCachePath: row.text_cache_path,
+    tokenIndexPath: row.token_index_path,
     cacheSizeBytes: row.cache_size_bytes ?? 0,
     trigramCount: row.trigram_count ?? 0,
+    tokenCount: row.token_count ?? 0,
     lineCount: row.line_count ?? 0,
     minTimestampMs: row.min_timestamp_ms,
     maxTimestampMs: row.max_timestamp_ms,
@@ -1111,12 +1121,12 @@ export function upsertCacheChunk(input: UpsertCacheChunkInput) {
     `INSERT INTO chunks (
       chunk_pk, provider, bucket, object_key, version_token, etag, chunk_id, byte_start, byte_end,
       start_line_number, end_line_number,
-      artifact_path, text_cache_path, cache_size_bytes, trigram_count, line_count,
+      artifact_path, text_cache_path, token_index_path, cache_size_bytes, trigram_count, token_count, line_count,
       min_timestamp_ms, max_timestamp_ms, created_at, last_accessed_at
     ) VALUES (
       @chunkPk, @provider, @bucket, @objectKey, @versionToken, @etag, @chunkId, @byteStart, @byteEnd,
       @startLineNumber, @endLineNumber,
-      @artifactPath, @textCachePath, @cacheSizeBytes, @trigramCount, @lineCount,
+      @artifactPath, @textCachePath, @tokenIndexPath, @cacheSizeBytes, @trigramCount, @tokenCount, @lineCount,
       @minTimestampMs, @maxTimestampMs,
       @createdAt, @lastAccessedAt
     )
@@ -1133,8 +1143,10 @@ export function upsertCacheChunk(input: UpsertCacheChunkInput) {
       end_line_number = excluded.end_line_number,
       artifact_path = excluded.artifact_path,
       text_cache_path = excluded.text_cache_path,
+      token_index_path = excluded.token_index_path,
       cache_size_bytes = excluded.cache_size_bytes,
       trigram_count = excluded.trigram_count,
+      token_count = excluded.token_count,
       line_count = excluded.line_count,
       min_timestamp_ms = excluded.min_timestamp_ms,
       max_timestamp_ms = excluded.max_timestamp_ms,
@@ -1153,8 +1165,10 @@ export function upsertCacheChunk(input: UpsertCacheChunkInput) {
     endLineNumber: input.endLineNumber,
     artifactPath: input.artifactPath,
     textCachePath: input.textCachePath,
+    tokenIndexPath: input.tokenIndexPath,
     cacheSizeBytes: input.cacheSizeBytes,
     trigramCount: input.trigramCount,
+    tokenCount: input.tokenCount,
     lineCount: input.lineCount,
     minTimestampMs: input.minTimestampMs,
     maxTimestampMs: input.maxTimestampMs,
