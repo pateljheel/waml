@@ -46,10 +46,29 @@ type Notebook = {
   query: string;
   pageSize: number;
   contextLineCount: number;
+  journalEntries: NotebookJournalEntry[];
+  journalDraft: string;
   startTime: string;
   endTime: string;
   range: string;
   updatedAt: string;
+};
+
+type NotebookJournalEntry = {
+  id: string;
+  type: "log" | "response";
+  createdAt: string;
+  text: string;
+  objectKey?: string;
+  lineNumber?: number;
+  timestampText?: string;
+  query?: string;
+  contextLines?: Array<{
+    objectKey: string;
+    lineNumber: number;
+    lineText: string;
+    isMatch: boolean;
+  }>;
 };
 
 type PartitionDefinition = {
@@ -161,6 +180,8 @@ const initialNotebooks: Notebook[] = [
     query: 'timeout while awaiting headers service="checkout-api"',
     pageSize: 100,
     contextLineCount: 20,
+    journalEntries: [],
+    journalDraft: "",
     startTime: "",
     endTime: "",
     range: "Last 90 min",
@@ -189,6 +210,8 @@ const initialNotebooks: Notebook[] = [
     query: 'token refresh failed service="auth-service"',
     pageSize: 100,
     contextLineCount: 20,
+    journalEntries: [],
+    journalDraft: "",
     startTime: "",
     endTime: "",
     range: "Today",
@@ -217,6 +240,8 @@ const initialNotebooks: Notebook[] = [
     query: 'consumer lag service="worker-ingest"',
     pageSize: 100,
     contextLineCount: 20,
+    journalEntries: [],
+    journalDraft: "",
     startTime: "",
     endTime: "",
     range: "May 2026",
@@ -334,6 +359,8 @@ function normalizeNotebook(notebook: Partial<Notebook> & Pick<Notebook, "id" | "
     query: "",
     pageSize: 100,
     contextLineCount: 20,
+    journalEntries: [],
+    journalDraft: "",
     startTime: "",
     endTime: "",
     range: "",
@@ -352,6 +379,8 @@ function normalizeNotebook(notebook: Partial<Notebook> & Pick<Notebook, "id" | "
     partitionOverrides: normalizedNotebook.partitionOverrides ?? {},
     partitionFilters: normalizePrefixFilters(normalizedNotebook.partitionFilters),
     contextLineCount: normalizedNotebook.contextLineCount ?? 20,
+    journalEntries: normalizedNotebook.journalEntries ?? [],
+    journalDraft: normalizedNotebook.journalDraft ?? "",
   } satisfies Notebook;
 }
 
@@ -407,6 +436,21 @@ function clonePrefixFilters(prefixFilters: PrefixFilters) {
         : { mode: "range", start: filter.start, end: filter.end },
     ]),
   ) as PrefixFilters;
+}
+
+function formatJournalTimestamp(value: string) {
+  const parsed = new Date(value);
+
+  if (Number.isNaN(parsed.getTime())) {
+    return value;
+  }
+
+  return parsed.toLocaleString([], {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
 }
 
 export default function HomePage() {
@@ -1333,6 +1377,8 @@ export default function HomePage() {
       query: "",
       pageSize: activeNotebook.pageSize,
       contextLineCount: activeNotebook.contextLineCount,
+      journalEntries: [],
+      journalDraft: "",
       startTime: activeNotebook.startTime,
       endTime: activeNotebook.endTime,
       range: "Last 60 min",
@@ -1360,6 +1406,11 @@ export default function HomePage() {
       id: crypto.randomUUID(),
       title: `${activeNotebook.title} copy`,
       partitionFilters: clonePrefixFilters(activeNotebook.partitionFilters ?? {}),
+      journalEntries: activeNotebook.journalEntries.map((entry) => ({
+        ...entry,
+        contextLines: entry.contextLines?.map((line) => ({ ...line })),
+      })),
+      journalDraft: "",
       updatedAt: "Just now",
     };
 
@@ -1375,6 +1426,82 @@ export default function HomePage() {
     const remaining = notebooks.filter((notebook) => notebook.id !== activeNotebookId);
     setNotebooks(remaining);
     setActiveNotebookId(remaining[0].id);
+  }
+
+  function addResultToJournal(result: SearchMatch) {
+    const contextKey = getResultContextKey(result);
+    const contextState =
+      searchStateByNotebook[activeNotebook.id]?.contextByResultKey[contextKey];
+
+    const entry: NotebookJournalEntry = {
+      id: crypto.randomUUID(),
+      type: "log",
+      createdAt: new Date().toISOString(),
+      text: result.lineText,
+      objectKey: result.objectKey,
+      lineNumber: result.lineNumber,
+      timestampText: result.timestampText,
+      query: activeNotebook.query.trim(),
+      contextLines: contextState?.open
+        ? contextState.lines.map((line) => ({ ...line }))
+        : undefined,
+    };
+
+    setNotebooks((currentNotebooks) =>
+      currentNotebooks.map((notebook) =>
+        notebook.id === activeNotebookId
+          ? {
+              ...notebook,
+              journalEntries: [entry, ...notebook.journalEntries],
+              updatedAt: "Just now",
+            }
+          : notebook,
+      ),
+    );
+  }
+
+  function addJournalResponse() {
+    const text = activeNotebook.journalDraft.trim();
+
+    if (!text) {
+      return;
+    }
+
+    const entry: NotebookJournalEntry = {
+      id: crypto.randomUUID(),
+      type: "response",
+      createdAt: new Date().toISOString(),
+      text,
+    };
+
+    setNotebooks((currentNotebooks) =>
+      currentNotebooks.map((notebook) =>
+        notebook.id === activeNotebookId
+          ? {
+              ...notebook,
+              journalEntries: [entry, ...notebook.journalEntries],
+              journalDraft: "",
+              updatedAt: "Just now",
+            }
+          : notebook,
+      ),
+    );
+  }
+
+  function removeJournalEntry(entryId: string) {
+    setNotebooks((currentNotebooks) =>
+      currentNotebooks.map((notebook) =>
+        notebook.id === activeNotebookId
+          ? {
+              ...notebook,
+              journalEntries: notebook.journalEntries.filter(
+                (entry) => entry.id !== entryId,
+              ),
+              updatedAt: "Just now",
+            }
+          : notebook,
+      ),
+    );
   }
 
   function selectPrefixPage(nextCursor: string | null) {
@@ -3491,104 +3618,227 @@ export default function HomePage() {
                 ))}
               </div>
             ) : null}
-            <div className="search-results">
-              {currentSearchState.results.length === 0 ? (
-                <div className="search-results-empty">
-                  {currentSearchState.status === "idle"
-                    ? "Run a search to see live results."
-                    : currentSearchState.loadingPage
-                      ? "Loading buffered results..."
-                    : "No matches yet."}
+            <div className="notebook-workspace-grid">
+              <section className="notebook-pane">
+                <div className="notebook-pane-header">
+                  <div>
+                    <div className="eyebrow">Search results</div>
+                    <h3>Returned logs</h3>
+                  </div>
+                  <span className="notebook-pane-count">
+                    {currentSearchState.totalResults} buffered
+                  </span>
                 </div>
-              ) : (
-                currentSearchState.results.map((result, index) => {
-                  const contextKey = getResultContextKey(result);
-                  const contextState =
-                    currentSearchState.contextByResultKey[contextKey];
+                <div className="search-results">
+                  {currentSearchState.results.length === 0 ? (
+                    <div className="search-results-empty">
+                      {currentSearchState.status === "idle"
+                        ? "Run a search to see live results."
+                        : currentSearchState.loadingPage
+                          ? "Loading buffered results..."
+                        : "No matches yet."}
+                    </div>
+                  ) : (
+                    currentSearchState.results.map((result, index) => {
+                      const contextKey = getResultContextKey(result);
+                      const contextState =
+                        currentSearchState.contextByResultKey[contextKey];
 
-                  return (
-                    <div
-                      key={`${result.objectKey}:${result.lineNumber}:${index}`}
-                      className="search-result-row"
-                    >
-                      <div className="search-result-meta">
-                        <span>{result.objectKey}</span>
-                        <span>line {result.lineNumber}</span>
-                        {result.timestampText ? <span>{result.timestampText}</span> : null}
-                        <button
-                          type="button"
-                          className="secondary-button search-result-context-button"
-                          onClick={() => toggleResultContext(result)}
+                      return (
+                        <div
+                          key={`${result.objectKey}:${result.lineNumber}:${index}`}
+                          className="search-result-row"
                         >
-                          {contextState?.loading
-                            ? "Loading context..."
-                            : contextState?.open
-                              ? "Hide context"
-                              : "Show context"}
-                        </button>
-                      </div>
-                      <code className="search-result-line">{result.lineText}</code>
-                      {contextState?.open ? (
-                        <div className="search-result-context">
-                          {contextState.source ? (
-                            <div className="search-result-context-meta">
-                              Context source: {contextState.source}
-                            </div>
-                          ) : null}
-                          {contextState.error ? (
-                            <p className="field-error">{contextState.error}</p>
-                          ) : null}
-                          {contextState.lines.map((line, lineIndex) => (
-                            <div key={`${contextKey}:${line.objectKey}:${line.lineNumber}`}>
-                              {lineIndex === 0 ||
-                              contextState.lines[lineIndex - 1]?.objectKey !==
-                                line.objectKey ? (
-                                <div className="search-context-object-boundary">
-                                  {line.objectKey}
+                          <div className="search-result-meta">
+                            <span>{result.objectKey}</span>
+                            <span>line {result.lineNumber}</span>
+                            {result.timestampText ? <span>{result.timestampText}</span> : null}
+                            <button
+                              type="button"
+                              className="secondary-button search-result-context-button"
+                              onClick={() => addResultToJournal(result)}
+                            >
+                              Add to journal
+                            </button>
+                            <button
+                              type="button"
+                              className="secondary-button"
+                              onClick={() => toggleResultContext(result)}
+                            >
+                              {contextState?.loading
+                                ? "Loading context..."
+                                : contextState?.open
+                                  ? "Hide context"
+                                  : "Show context"}
+                            </button>
+                          </div>
+                          <code className="search-result-line">{result.lineText}</code>
+                          {contextState?.open ? (
+                            <div className="search-result-context">
+                              {contextState.source ? (
+                                <div className="search-result-context-meta">
+                                  Context source: {contextState.source}
                                 </div>
                               ) : null}
-                              <div
-                                className={`search-context-line${
-                                  line.isMatch ? " is-match" : ""
-                                }`}
-                              >
-                                <span className="search-context-line-number">
-                                  {line.lineNumber}
-                                </span>
-                                <code className="search-context-line-text">
-                                  {line.lineText}
-                                </code>
-                              </div>
+                              {contextState.error ? (
+                                <p className="field-error">{contextState.error}</p>
+                              ) : null}
+                              {contextState.lines.map((line, lineIndex) => (
+                                <div key={`${contextKey}:${line.objectKey}:${line.lineNumber}`}>
+                                  {lineIndex === 0 ||
+                                  contextState.lines[lineIndex - 1]?.objectKey !==
+                                    line.objectKey ? (
+                                    <div className="search-context-object-boundary">
+                                      {line.objectKey}
+                                    </div>
+                                  ) : null}
+                                  <div
+                                    className={`search-context-line${
+                                      line.isMatch ? " is-match" : ""
+                                    }`}
+                                  >
+                                    <span className="search-context-line-number">
+                                      {line.lineNumber}
+                                    </span>
+                                    <code className="search-context-line-text">
+                                      {line.lineText}
+                                    </code>
+                                  </div>
+                                </div>
+                              ))}
                             </div>
-                          ))}
+                          ) : null}
                         </div>
-                      ) : null}
+                      );
+                    })
+                  )}
+                </div>
+                <div className="pager-row search-results-pager">
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    onClick={loadPreviousResultsPage}
+                    disabled={!hasPreviousResultsPage || currentSearchState.loadingPage}
+                  >
+                    Prev page
+                  </button>
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    onClick={loadNextResultsPage}
+                    disabled={!canLoadNextResultsPage}
+                  >
+                    {currentSearchState.loadingPage
+                      ? "Loading..."
+                      : hasBufferedNextResultsPage
+                        ? "Next page"
+                        : "Scan more"}
+                  </button>
+                </div>
+              </section>
+              <section className="notebook-pane notebook-journal-pane">
+                <div className="notebook-pane-header">
+                  <div>
+                    <div className="eyebrow">Journal</div>
+                    <h3>Case history</h3>
+                  </div>
+                  <span className="notebook-pane-count">
+                    {activeNotebook.journalEntries.length} entries
+                  </span>
+                </div>
+                <form
+                  className="journal-composer"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    addJournalResponse();
+                  }}
+                >
+                  <label htmlFor="journal-draft">Customer response</label>
+                  <textarea
+                    id="journal-draft"
+                    value={activeNotebook.journalDraft}
+                    placeholder="Add a customer-facing response or case note."
+                    onChange={(event) =>
+                      updateActiveNotebook("journalDraft", event.target.value)
+                    }
+                  />
+                  <div className="journal-composer-actions">
+                    <button
+                      type="submit"
+                      className="secondary-button"
+                      disabled={!activeNotebook.journalDraft.trim()}
+                    >
+                      Add response
+                    </button>
+                  </div>
+                </form>
+                <div className="journal-history">
+                  {activeNotebook.journalEntries.length === 0 ? (
+                    <div className="search-results-empty">
+                      Add log lines from search results or write a response to start the notebook history.
                     </div>
-                  );
-                })
-              )}
-            </div>
-            <div className="pager-row search-results-pager">
-              <button
-                type="button"
-                className="secondary-button"
-                onClick={loadPreviousResultsPage}
-                disabled={!hasPreviousResultsPage || currentSearchState.loadingPage}
-              >
-                Prev page
-              </button>
-              <button
-                type="button"
-                className="secondary-button"
-                onClick={loadNextResultsPage}
-                disabled={!canLoadNextResultsPage}
-              >
-                {currentSearchState.loadingPage
-                  ? "Loading..."
-                  : hasBufferedNextResultsPage
-                    ? "Next page"
-                    : "Scan more"}
-              </button>
+                  ) : (
+                    activeNotebook.journalEntries.map((entry) => (
+                      <article
+                        key={entry.id}
+                        className={`journal-entry journal-entry-${entry.type}`}
+                      >
+                        <div className="journal-entry-header">
+                          <div className="journal-entry-meta">
+                            <span className="journal-entry-badge">
+                              {entry.type === "log" ? "Log" : "Response"}
+                            </span>
+                            <span>{formatJournalTimestamp(entry.createdAt)}</span>
+                            {entry.objectKey ? <span>{entry.objectKey}</span> : null}
+                            {entry.lineNumber ? <span>line {entry.lineNumber}</span> : null}
+                            {entry.timestampText ? <span>{entry.timestampText}</span> : null}
+                          </div>
+                          <button
+                            type="button"
+                            className="secondary-button journal-entry-remove"
+                            onClick={() => removeJournalEntry(entry.id)}
+                          >
+                            Remove
+                          </button>
+                        </div>
+                        {entry.query ? (
+                          <div className="journal-entry-query">
+                            Query: {entry.query}
+                          </div>
+                        ) : null}
+                        <code className="journal-entry-text">{entry.text}</code>
+                        {entry.contextLines && entry.contextLines.length > 0 ? (
+                          <div className="journal-entry-context">
+                            {entry.contextLines.map((line, lineIndex) => (
+                              <div key={`${entry.id}:${line.objectKey}:${line.lineNumber}`}>
+                                {lineIndex === 0 ||
+                                entry.contextLines?.[lineIndex - 1]?.objectKey !==
+                                  line.objectKey ? (
+                                  <div className="search-context-object-boundary">
+                                    {line.objectKey}
+                                  </div>
+                                ) : null}
+                                <div
+                                  className={`search-context-line${
+                                    line.isMatch ? " is-match" : ""
+                                  }`}
+                                >
+                                  <span className="search-context-line-number">
+                                    {line.lineNumber}
+                                  </span>
+                                  <code className="search-context-line-text">
+                                    {line.lineText}
+                                  </code>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        ) : null}
+                      </article>
+                    ))
+                  )}
+                </div>
+              </section>
             </div>
           </div>
         </section>

@@ -38,7 +38,8 @@ body {
 
 button,
 input,
-select {
+select,
+textarea {
   font: inherit;
 }
 
@@ -52,7 +53,8 @@ button:disabled {
 }
 
 input,
-select {
+select,
+textarea {
   width: 100%;
   min-height: 34px;
   padding: 0.46rem 0.62rem;
@@ -67,11 +69,21 @@ input::placeholder {
   color: var(--muted);
 }
 
+textarea::placeholder {
+  color: var(--muted);
+}
+
 input:focus,
-select:focus {
+select:focus,
+textarea:focus {
   outline: none;
   border-color: var(--border-strong);
   box-shadow: 0 0 0 3px rgba(47, 111, 237, 0.08);
+}
+
+textarea {
+  min-height: 88px;
+  resize: vertical;
 }
 
 .workspace {
@@ -609,6 +621,37 @@ select:focus {
   overflow-y: auto;
 }
 
+.notebook-workspace-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(320px, 0.8fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.notebook-pane {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.notebook-pane-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.notebook-pane-header h3 {
+  margin: 0;
+  font-size: 0.92rem;
+  font-weight: 600;
+}
+
+.notebook-pane-count {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
 .search-results-pager {
   justify-content: flex-start;
   margin-top: 2px;
@@ -729,6 +772,91 @@ select:focus {
   border: 1px solid var(--border);
   border-radius: 5px;
   background: rgba(15, 23, 42, 0.02);
+}
+
+.notebook-journal-pane {
+  padding-left: 2px;
+}
+
+.journal-composer {
+  display: grid;
+  gap: 6px;
+}
+
+.journal-composer label {
+  color: var(--muted);
+  font-size: 0.7rem;
+  font-weight: 600;
+}
+
+.journal-composer-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.journal-history {
+  display: grid;
+  gap: 8px;
+  max-height: 520px;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
+.journal-entry {
+  display: grid;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.55);
+}
+
+.journal-entry-response {
+  background: rgba(47, 111, 237, 0.05);
+}
+
+.journal-entry-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.journal-entry-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 0.69rem;
+}
+
+.journal-entry-badge {
+  color: var(--muted-2);
+  font-weight: 600;
+}
+
+.journal-entry-remove {
+  white-space: nowrap;
+}
+
+.journal-entry-query {
+  color: var(--muted);
+  font-size: 0.69rem;
+}
+
+.journal-entry-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text);
+  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-size: 0.73rem;
+}
+
+.journal-entry-context {
+  display: grid;
+  gap: 4px;
+  padding-top: 2px;
+  border-top: 1px solid var(--border);
 }
 
 .search-result-context-meta {
@@ -994,6 +1122,10 @@ select:focus {
   .time-mapping-row,
   .time-parser-grid,
   .search-time-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .notebook-workspace-grid {
     grid-template-columns: 1fr;
   }
 

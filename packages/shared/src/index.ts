@@ -1,4 +1,5 @@
 import { z } from "zod";
+export * from "./path-patterns";
 
 export const queryModeSchema = z.enum(["substring", "all_tokens"]);
 export type QueryMode = z.infer<typeof queryModeSchema>;

@@ -26,6 +26,8 @@ import {
 import {
   deriveCoarseTimeRangeFromMappings,
   doesRangeOverlap,
+  extractCustomValues,
+  extractHiveValues,
   extractLineTimestamp,
   isTimestampInRange,
   parseQueryTimestamp,
@@ -50,8 +52,6 @@ import {
   shouldSkipObjectByKey,
 } from "./content-detection";
 import {
-  extractCustomValues,
-  extractHiveValues,
   objectMatchesFilters,
 } from "./path-filters";
 import {
