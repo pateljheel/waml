@@ -9,6 +9,7 @@ var/data/*.db-wal
 var/cache/*
 !var/cache/.gitkeep
 !var/data/.gitkeep
+apps/worker/var/
 
 .codex-session
 .codex-session-*
