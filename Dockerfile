@@ -13,7 +13,9 @@ COPY packages/shared/package.json packages/shared/package.json
 RUN pnpm install --frozen-lockfile
 
 FROM deps AS builder
-COPY . .
+COPY apps ./apps
+COPY packages ./packages
+COPY docker ./docker
 RUN pnpm build
 
 FROM base AS runtime
@@ -26,8 +28,9 @@ COPY --from=builder /app/tsconfig.base.json ./tsconfig.base.json
 COPY --from=builder /app/apps ./apps
 COPY --from=builder /app/packages ./packages
 COPY --from=builder /app/docker ./docker
-RUN node -e "const fs=require('node:fs'); const updates={ 'packages/db/package.json': { main:'dist/db/src/index.js', types:'dist/db/src/index.d.ts' }, 'packages/shared/package.json': { main:'dist/index.js', types:'dist/index.d.ts' } }; for (const [name, fields] of Object.entries(updates)) { const pkg=JSON.parse(fs.readFileSync(name,'utf8')); Object.assign(pkg, fields); fs.writeFileSync(name, JSON.stringify(pkg, null, 2) + '\n'); } const sharedIndex='packages/shared/dist/index.js'; fs.writeFileSync(sharedIndex, fs.readFileSync(sharedIndex,'utf8').replace('from \"./time\";','from \"./time.js\";'));" \
+RUN node -e "const fs=require('node:fs'); const updates={ 'packages/db/package.json': { main:'dist/db/src/index.js', types:'dist/db/src/index.d.ts' }, 'packages/shared/package.json': { main:'dist/index.js', types:'dist/index.d.ts' } }; for (const [name, fields] of Object.entries(updates)) { const pkg=JSON.parse(fs.readFileSync(name,'utf8')); Object.assign(pkg, fields); fs.writeFileSync(name, JSON.stringify(pkg, null, 2) + '\n'); } const sharedIndex='packages/shared/dist/index.js'; const sharedSource=fs.readFileSync(sharedIndex,'utf8').replace('from \"./time\";','from \"./time.js\";').replace('from \"./path-patterns\";','from \"./path-patterns.js\";'); fs.writeFileSync(sharedIndex, sharedSource);" \
   && mkdir -p /app/node_modules/@waml \
+  && mkdir -p /app/var/data /app/var/cache /app/var/health \
   && ln -sfn ../../packages/db /app/node_modules/@waml/db \
   && ln -sfn ../../packages/shared /app/node_modules/@waml/shared \
   && chmod +x /app/docker/web-entrypoint.sh /app/docker/worker-entrypoint.sh /app/docker/web-healthcheck.sh /app/docker/worker-healthcheck.sh
